@@ -36,3 +36,12 @@ The local site uses the same Supabase project as the live one. For the map, the 
 
 - Authentication, Sign In / Providers, Email: **Confirm email off**. The admin approves everyone, and Supabase's built-in email sends only a few messages an hour.
 - Authentication, URL Configuration: Site URL `https://mft-lunch-picker.vercel.app`.
+
+## Contributing
+
+1. Fork the repo (or create a branch if you were added as a collaborator) and make your change.
+2. Run `npm run typecheck` and `npm test`.
+3. Open a pull request into `main`. Michael reviews it; `main` only changes through approved pull requests, and every merge to `main` goes live.
+4. Database changes: add a new SQL file in `supabase/migrations/` (for example `0002_…sql`) in your pull request. Michael applies it to the database when he merges. Contributors don't get database access.
+
+Never commit secrets. The only key in this repo is the Supabase publishable key, which is public by design; anything else (secret keys, passwords, the Google Maps key) stays out of the code.
