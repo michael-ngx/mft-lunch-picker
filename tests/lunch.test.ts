@@ -1,0 +1,141 @@
+// Every suggestion passes every fixed filter, and the ranking.
+import { describe, expect, it } from "vitest";
+import {
+  DEFAULT_FILTERS, budgetPhrase, distanceM, dropReason, fmtBudget, fmtDistance, fmtPrice, isOpenAt, normalizeFilters, pickLunch, priceFits,
+  type Candidate, type LatLng, type LunchFilters,
+} from "../src/lib/lunch.ts";
+
+const HOME: LatLng = { lat: 45.5017, lng: -73.5673 }; // Montréal
+/** A point d meters north of HOME. */
+const north = (d: number): LatLng => ({ lat: HOME.lat + d / 111_195, lng: HOME.lng });
+
+function place(id: string, over: Partial<Candidate> = {}): Candidate {
+  return {
+    id, name: id, pos: north(300), rating: 4.5, ratingCount: 500,
+    price: { start: 10, end: 20, currency: "CAD" }, priceLevel: null, openNow: true, status: "OPERATIONAL",
+    type: "Restaurant", address: "", mapsUrl: "", ...over,
+  };
+}
+
+const F: LunchFilters = { ...DEFAULT_FILTERS, bands: ["10-20", "20-30"], radiusM: 1000, minRating: 4.2, count: 5, openNow: true, allowNoPrice: false };
+
+describe("team filters", () => {
+  it("fills defaults and clamps stored values", () => {
+    expect(normalizeFilters(undefined)).toEqual(DEFAULT_FILTERS);
+    expect(normalizeFilters({})).toEqual(DEFAULT_FILTERS);
+    const f = normalizeFilters({ radiusM: 99_999, minRating: 7, count: 0, bands: ["100+", "bogus", "1-10"] });
+    expect(f.radiusM).toBe(5000);
+    expect(f.minRating).toBe(4.9);
+    expect(f.count).toBe(1);
+    expect(f.bands).toEqual(["1-10", "100+"]);
+  });
+  it("keeps an empty budget as any price", () => {
+    expect(normalizeFilters({ bands: [] }).bands).toEqual([]);
+    expect(fmtBudget([])).toBe("Any price");
+  });
+});
+
+describe("budget", () => {
+  it("needs the whole Google range inside the selected bands", () => {
+    expect(priceFits({ start: 10, end: 20, currency: "CAD" }, ["10-20"])).toBe(true);
+    expect(priceFits({ start: 20, end: 30, currency: "CAD" }, ["10-20"])).toBe(false);
+    expect(priceFits({ start: 15, end: 25, currency: "CAD" }, ["10-20"])).toBe(false);
+  });
+  it("joins neighbouring bands", () => {
+    expect(priceFits({ start: 15, end: 25, currency: "CAD" }, ["10-20", "20-30"])).toBe(true);
+    expect(priceFits({ start: 15, end: 25, currency: "CAD" }, ["10-20", "30-50"])).toBe(false);
+    expect(fmtBudget(["1-10", "10-20", "50-100"])).toBe("Up to $20, $50–100");
+    expect(budgetPhrase(["1-10", "10-20", "20-30"])).toBe("$30 or less");
+    expect(budgetPhrase(["30-50", "50-100", "100+"])).toBe("$30 or more");
+  });
+  it("lets an open-ended range ($100+) through only the open-ended band", () => {
+    expect(priceFits({ start: 100, end: null, currency: "CAD" }, ["50-100"])).toBe(false);
+    expect(priceFits({ start: 100, end: null, currency: "CAD" }, ["100+"])).toBe(true);
+    expect(priceFits({ start: 1, end: 10, currency: "CAD" }, ["1-10"])).toBe(true);
+  });
+  it("drops places with no price range unless allowed", () => {
+    const c = place("x", { price: null });
+    expect(dropReason(c, F, HOME)).toBe("noPrice");
+    expect(dropReason(c, { ...F, allowNoPrice: true }, HOME)).toBeNull();
+    expect(dropReason(c, { ...F, bands: [] }, HOME)).toBeNull();
+  });
+});
+
+describe("opening hours", () => {
+  // Mon–Fri 11:00–15:00 in Montréal (UTC−5 in November).
+  const lunchOnly = [1, 2, 3, 4, 5].map((day) => ({ open: { day, hour: 11, minute: 0 }, close: { day, hour: 15, minute: 0 } }));
+  const at = (iso: string) => Date.parse(iso);
+  it("reads the place's local time from its UTC offset", () => {
+    expect(isOpenAt(lunchOnly, -300, at("2026-11-09T17:00:00Z"))).toBe(true); // Monday noon
+    expect(isOpenAt(lunchOnly, -300, at("2026-11-09T21:00:00Z"))).toBe(false); // Monday 4 pm
+    expect(isOpenAt(lunchOnly, -300, at("2026-11-08T17:00:00Z"))).toBe(false); // Sunday noon
+  });
+  it("handles periods past midnight and across the end of the week", () => {
+    const late = [{ open: { day: 6, hour: 18, minute: 0 }, close: { day: 0, hour: 2, minute: 0 } }];
+    expect(isOpenAt(late, 0, at("2026-11-08T01:00:00Z"))).toBe(true); // Sunday 1 am
+    expect(isOpenAt(late, 0, at("2026-11-07T19:00:00Z"))).toBe(true); // Saturday 7 pm
+    expect(isOpenAt(late, 0, at("2026-11-08T03:00:00Z"))).toBe(false);
+  });
+  it("treats one period with no close as always open, and no hours as unknown", () => {
+    expect(isOpenAt([{ open: { day: 0, hour: 0, minute: 0 } }], -300, Date.now())).toBe(true);
+    expect(isOpenAt([], -300, Date.now())).toBeNull();
+    expect(isOpenAt(lunchOnly, null, Date.now())).toBeNull();
+  });
+});
+
+describe("picking", () => {
+  it("never suggests a place that breaks a fixed filter", () => {
+    const cands = [
+      place("ok"),
+      place("far", { pos: north(1500) }),
+      place("low", { rating: 4.1 }),
+      place("unrated", { rating: null, ratingCount: 0 }),
+      place("pricey", { price: { start: 30, end: 50, currency: "CAD" } }),
+      place("closed", { openNow: false }),
+      place("gone", { status: "CLOSED_PERMANENTLY" }),
+      place("hours-unknown", { openNow: null }),
+    ];
+    const { suggestions, summary } = pickLunch(cands, F, HOME);
+    expect(suggestions.map((s) => s.id).sort()).toEqual(["hours-unknown", "ok"]);
+    expect(summary).toEqual({ found: 8, matched: 2, dropped: { far: 1, rating: 2, budget: 1, closedNow: 1, closedForGood: 1 } });
+    for (const s of suggestions) {
+      expect(distanceM(HOME, s.pos)).toBeLessThanOrEqual(F.radiusM);
+      expect(s.rating!).toBeGreaterThanOrEqual(F.minRating);
+    }
+  });
+  it("keeps closed places when open now is off", () => {
+    expect(pickLunch([place("closed", { openNow: false })], { ...F, openNow: false }, HOME).suggestions).toHaveLength(1);
+  });
+  it("returns at most the number asked for, ranked 1..n", () => {
+    const cands = Array.from({ length: 12 }, (_, i) => place(`p${i}`, { rating: 4.3 + i * 0.05 }));
+    const { suggestions } = pickLunch(cands, F, HOME);
+    expect(suggestions).toHaveLength(5);
+    expect(suggestions.map((s) => s.rank)).toEqual([1, 2, 3, 4, 5]);
+    expect(suggestions[0].id).toBe("p11");
+  });
+  it("trusts a rating more when it rests on more reviews", () => {
+    const few = place("few", { rating: 4.9, ratingCount: 6 });
+    const many = place("many", { rating: 4.6, ratingCount: 2400 });
+    const avg = place("avg", { rating: 4.3, ratingCount: 300 });
+    expect(pickLunch([few, many, avg], F, HOME).suggestions[0].id).toBe("many");
+  });
+  it("lets the nearer place win a close call", () => {
+    const near = place("near", { rating: 4.5, pos: north(100) });
+    const edge = place("edge", { rating: 4.55, pos: north(950) });
+    expect(pickLunch([edge, near], F, HOME).suggestions[0].id).toBe("near");
+  });
+  it("counts a place found by two searches once", () => {
+    const { summary } = pickLunch([place("a"), place("a"), place("b")], F, HOME);
+    expect(summary.found).toBe(2);
+  });
+});
+
+describe("display", () => {
+  it("formats distance and price", () => {
+    expect(fmtDistance(437)).toBe("440 m");
+    expect(fmtDistance(1250)).toBe("1.3 km");
+    expect(fmtPrice({ start: 10, end: 20, currency: "CAD" })).toBe("$10–20");
+    expect(fmtPrice({ start: 100, end: null, currency: "CAD" })).toBe("$100+");
+    expect(fmtPrice({ start: 20, end: 30, currency: "EUR" })).toBe("€20–30");
+  });
+});
