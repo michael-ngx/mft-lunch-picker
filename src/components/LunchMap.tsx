@@ -31,6 +31,8 @@ interface Props {
   /** When set, tapping the map calls this with the tapped spot. */
   onTap?: (pos: LatLng) => void;
   onStatus?: (s: MapStatus, error?: string) => void;
+  /** Space covered by the floating list, kept clear when the map fits the circle. */
+  padding?: { top: number; right: number; bottom: number; left: number };
 }
 
 function el(cls: string, text = ""): HTMLDivElement {
@@ -40,12 +42,14 @@ function el(cls: string, text = ""): HTMLDivElement {
   return d;
 }
 
-export function LunchMap({ apiKey, mapId, me, center, radiusM, suggestions, selected, onSelect, onTap, onStatus }: Props) {
+const NO_PAD = { top: 28, right: 28, bottom: 28, left: 28 };
+
+export function LunchMap({ apiKey, mapId, me, center, radiusM, suggestions, selected, onSelect, onTap, onStatus, padding = NO_PAD }: Props) {
   const box = useRef<HTMLDivElement>(null);
   const gm = useRef<Gm | null>(null);
   const [ready, setReady] = useState(false);
-  const latest = useRef({ me, center, radiusM, onSelect, onTap, onStatus });
-  latest.current = { me, center, radiusM, onSelect, onTap, onStatus };
+  const latest = useRef({ me, center, radiusM, onSelect, onTap, onStatus, padding });
+  latest.current = { me, center, radiusM, onSelect, onTap, onStatus, padding };
 
   // Load Google Maps and create the map once.
   useEffect(() => {
@@ -63,6 +67,8 @@ export function LunchMap({ apiKey, mapId, me, center, radiusM, suggestions, sele
       const map = new Map(box.current, {
         center: start, zoom: 15, mapId: mapId || "DEMO_MAP_ID",
         disableDefaultUI: true, zoomControl: true, fullscreenControl: false, clickableIcons: false, gestureHandling: "greedy",
+        // The bottom-right corner holds the Let's choose button.
+        zoomControlOptions: { position: google.maps.ControlPosition?.RIGHT_CENTER },
       });
       const circle = new Circle({
         map: latest.current.center ? map : null, center: start, radius: latest.current.radiusM, clickable: false,
@@ -73,7 +79,7 @@ export function LunchMap({ apiKey, mapId, me, center, radiusM, suggestions, sele
         if (e.latLng && latest.current.onTap) latest.current.onTap({ lat: e.latLng.lat(), lng: e.latLng.lng() });
       });
       gm.current = { map, circle, me: meDot, Marker: AdvancedMarkerElement, pins: new globalThis.Map() };
-      if (latest.current.center) map.fitBounds(circle.getBounds()!, 28);
+      if (latest.current.center) map.fitBounds(circle.getBounds()!, latest.current.padding);
       setReady(true);
       report("ready");
     })().catch((e) => { if (live) report("error", e instanceof Error ? e.message : String(e)); });
@@ -101,9 +107,9 @@ export function LunchMap({ apiKey, mapId, me, center, radiusM, suggestions, sele
     g.circle.setCenter(center);
     g.circle.setRadius(radiusM);
     g.circle.setMap(g.map);
-    const t = setTimeout(() => { const b = g.circle.getBounds(); if (b) g.map.fitBounds(b, 28); }, 90);
+    const t = setTimeout(() => { const b = g.circle.getBounds(); if (b) g.map.fitBounds(b, latest.current.padding); }, 90);
     return () => clearTimeout(t);
-  }, [ready, center?.lat, center?.lng, radiusM]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [ready, center?.lat, center?.lng, radiusM, padding.left, padding.bottom]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // One numbered pin per suggestion.
   useEffect(() => {

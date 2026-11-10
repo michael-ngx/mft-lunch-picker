@@ -1,7 +1,7 @@
 // Google Maps for the lunch picker: loading the Maps JavaScript API with the key
 // from Settings, and searching nearby places with the Places API (New).
 
-import { isOpenAt, type Candidate, type HoursPeriod, type LatLng, type LunchFilters } from "./lunch.ts";
+import { isOpenAt, type Candidate, type HoursPeriod, type LatLng, type LunchFilters, type PlacePhoto } from "./lunch.ts";
 
 declare global {
   interface Window {
@@ -51,10 +51,34 @@ export function loadMaps(key: string): Promise<void> {
 const TYPES = ["restaurant", "fast_food_restaurant", "sandwich_shop", "meal_takeaway"];
 const FIELDS = [
   "id", "displayName", "location", "rating", "userRatingCount", "priceLevel", "priceRange",
-  "regularOpeningHours", "utcOffsetMinutes", "businessStatus", "primaryTypeDisplayName", "shortFormattedAddress", "googleMapsURI",
+  "regularOpeningHours", "utcOffsetMinutes", "businessStatus", "primaryTypeDisplayName", "shortFormattedAddress", "googleMapsURI", "photos",
 ];
+const PHOTOS_PER_PLACE = 3;
 
 const money = (m: google.maps.places.Money | null | undefined) => (m ? m.units + m.nanos / 1e9 : null);
+
+/** Photo links for a place. Google bills each load of a photo link; when possible the
+ *  link is swapped once, here, for the image's final address, which loads for free,
+ *  so teammates opening the shared list don't add to the bill. */
+async function photosOf(p: google.maps.places.Place): Promise<PlacePhoto[]> {
+  const list = (p.photos ?? []).slice(0, PHOTOS_PER_PLACE);
+  return Promise.all(list.map(async (ph) => {
+    const author = ph.authorAttributions?.[0];
+    let uri = ph.getURI({ maxWidth: 640, maxHeight: 480 });
+    try {
+      const u = new URL(uri);
+      if (u.hostname === "places.googleapis.com" && u.pathname.endsWith("/media")) {
+        u.searchParams.set("skipHttpRedirect", "true");
+        const res = await fetch(u.toString());
+        if (res.ok) {
+          const j = (await res.json()) as { photoUri?: string };
+          if (j.photoUri) uri = j.photoUri;
+        }
+      }
+    } catch { /* keep the photo link as it is */ }
+    return { uri, author: author?.displayName ?? "", authorUri: author?.uri ?? "" };
+  }));
+}
 
 function toCandidate(p: google.maps.places.Place, now: number): Candidate | null {
   const loc = p.location;
@@ -91,7 +115,9 @@ function boundsAround(c: LatLng, radiusM: number): google.maps.LatLngBoundsLiter
 /** Three searches around the location, merged: the most popular places, the
  *  closest places, and Google's best matches for "lunch" at the minimum rating.
  *  Each returns at most 20 places. The fixed filters are applied afterwards. */
-export async function searchLunch(origin: LatLng, f: LunchFilters): Promise<Candidate[]> {
+export interface SearchResult { candidates: Candidate[]; places: Map<string, google.maps.places.Place> }
+
+export async function searchLunch(origin: LatLng, f: LunchFilters): Promise<SearchResult> {
   const { Place } = (await google.maps.importLibrary("places")) as google.maps.PlacesLibrary;
   const circle = { center: origin, radius: f.radiusM };
   const searches: Promise<{ places: google.maps.places.Place[] }>[] = [
@@ -111,7 +137,19 @@ export async function searchLunch(origin: LatLng, f: LunchFilters): Promise<Cand
     throw new Error(explain(first?.reason));
   }
   const now = Date.now();
-  return ok.flatMap((r) => r.value.places).map((p) => toCandidate(p, now)).filter((c): c is Candidate => !!c);
+  const places = new Map<string, google.maps.places.Place>();
+  for (const r of ok) for (const p of r.value.places) if (!places.has(p.id)) places.set(p.id, p);
+  const candidates = [...places.values()].map((p) => toCandidate(p, now)).filter((c): c is Candidate => !!c);
+  return { candidates, places };
+}
+
+/** Adds photos to the places that made the list (only those, to keep Google costs down). */
+export async function withPhotos<T extends Candidate>(list: T[], places: SearchResult["places"]): Promise<T[]> {
+  return Promise.all(list.map(async (s) => {
+    const place = places.get(s.id);
+    const photos = place ? await photosOf(place).catch(() => [] as PlacePhoto[]) : [];
+    return { ...s, photos };
+  }));
 }
 
 function explain(e: unknown): string {

@@ -8,6 +8,8 @@ import { JoinPage } from "./pages/JoinPage.tsx";
 import { PickerPage } from "./pages/PickerPage.tsx";
 import { AdminPage } from "./pages/AdminPage.tsx";
 import { AccountPage } from "./pages/AccountPage.tsx";
+import { ChoosePage } from "./pages/ChoosePage.tsx";
+import { WheelPage } from "./pages/WheelPage.tsx";
 
 export function App() {
   const status = useApp((s) => s.status);
@@ -22,6 +24,8 @@ export function App() {
       <Routes>
         <Route path="/admin" element={profile.role === "admin" ? <AdminPage /> : <Navigate to="/" replace />} />
         <Route path="/account" element={<AccountPage />} />
+        <Route path="/choose" element={team ? <ChoosePage /> : <Navigate to="/" replace />} />
+        <Route path="/choose/wheel" element={team ? <WheelPage /> : <Navigate to="/" replace />} />
         <Route path="*" element={team ? <PickerPage /> : <JoinPage />} />
       </Routes>
     </div>

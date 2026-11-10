@@ -5,6 +5,7 @@ import { Check, UserMinus, X } from "lucide-react";
 import { approve, createTeam, onAdminChange, removeMembership, saveConfig, useApp } from "../lib/store.ts";
 import { must, supabase } from "../lib/supabase.ts";
 import type { Membership, Profile } from "../lib/types.ts";
+import { BackLink } from "../components/Bits.tsx";
 
 interface Row extends Membership { profile: Profile | undefined }
 
@@ -37,6 +38,7 @@ export function AdminPage() {
 
   return (
     <main className="page">
+      <BackLink to="/">Back to lunch</BackLink>
       <h1>Admin</h1>
       {error && <div className="alert err">{error}</div>}
 

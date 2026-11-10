@@ -1,6 +1,7 @@
 // Your name (shown to your team), your team, and signing out.
 import { useState } from "react";
 import { leaveTeam, saveName, signOut, useApp } from "../lib/store.ts";
+import { BackLink } from "../components/Bits.tsx";
 
 export function AccountPage() {
   const profile = useApp((s) => s.profile)!;
@@ -14,6 +15,7 @@ export function AccountPage() {
 
   return (
     <main className="page narrow">
+      <BackLink to="/">Back to lunch</BackLink>
       <h1>Your account</h1>
       <section className="card">
         <div className="field"><label htmlFor="acc-name">Your name</label>

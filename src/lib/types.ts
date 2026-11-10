@@ -8,3 +8,7 @@ export interface TeamRun {
   origin: LatLng; filters: LunchFilters; suggestions: Suggestion[]; summary: RunSummary;
 }
 export interface AppConfig { google_maps_key: string; map_id: string; updated_at: string }
+export interface TeamDay {
+  team_id: string; day: string; contenders: string[]; pick: Suggestion | null;
+  picked_by: string | null; picked_by_name: string; picked_at: string | null;
+}

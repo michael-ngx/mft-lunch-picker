@@ -6,7 +6,7 @@ import { create } from "zustand";
 import type { RealtimeChannel, Session } from "@supabase/supabase-js";
 import { must, supabase } from "./supabase.ts";
 import { TEAM_TZ } from "./config.ts";
-import type { AppConfig, Membership, Profile, Team, TeamRun } from "./types.ts";
+import type { AppConfig, Membership, Profile, Team, TeamDay, TeamRun } from "./types.ts";
 import type { LatLng, LunchFilters, RunSummary, Suggestion } from "./lunch.ts";
 
 export interface Member extends Profile { status: Membership["status"] }
@@ -23,12 +23,14 @@ interface State {
   config: AppConfig | null;
   today: TeamRun | null;
   todayKey: string;
+  /** Today's contenders and the game's pick, shared by the team. */
+  teamDay: TeamDay | null;
   /** Admin only: requests waiting for approval. */
   pending: number;
 }
 
 export const useApp = create<State>(() => ({
-  status: "loading", session: null, profile: null, membership: null, teams: [], team: null, members: [], config: null, today: null, todayKey: "", pending: 0,
+  status: "loading", session: null, profile: null, membership: null, teams: [], team: null, members: [], config: null, today: null, todayKey: "", teamDay: null, pending: 0,
 }));
 const set = useApp.setState;
 const get = useApp.getState;
@@ -52,7 +54,12 @@ async function loadPending() {
 /** Reloads today's list when the date has changed (for a page left open overnight). */
 export function checkDay() {
   const t = get().team;
-  if (t && get().todayKey && get().todayKey !== dayKey()) void loadToday(t.id);
+  if (t && get().todayKey && get().todayKey !== dayKey()) { void loadToday(t.id); void loadTeamDay(t.id); }
+}
+
+async function loadTeamDay(teamId: string) {
+  const row = must(await supabase.from("team_days").select("*").eq("team_id", teamId).eq("day", dayKey()).maybeSingle());
+  set({ teamDay: (row as TeamDay | null) ?? null });
 }
 
 async function loadToday(teamId: string) {
@@ -85,8 +92,8 @@ export async function loadAll() {
     const cfg = must(await supabase.from("app_config").select("google_maps_key, map_id, updated_at").maybeSingle());
     set({ config: cfg as AppConfig | null });
   } else set({ config: null });
-  if (team) await Promise.all([loadToday(team.id), loadMembers(team.id)]);
-  else set({ today: null, members: [] });
+  if (team) await Promise.all([loadToday(team.id), loadMembers(team.id), loadTeamDay(team.id)]);
+  else set({ today: null, members: [], teamDay: null });
   const admin = (profile as Profile | null)?.role === "admin";
   if (admin) await loadPending();
   set({ status: "ready" });
@@ -121,6 +128,7 @@ function listen(uid: string, teamId: string | null, admin: boolean) {
         set((s) => ({ team: s.team && s.team.id === t.id ? { ...s.team, ...t } : s.team }));
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "memberships", filter: `team_id=eq.${teamId}` }, () => void loadMembers(teamId))
+      .on("postgres_changes", { event: "*", schema: "public", table: "team_days", filter: `team_id=eq.${teamId}` }, () => void loadTeamDay(teamId))
       .subscribe(),
   );
 }
@@ -132,7 +140,7 @@ export function boot() {
     set({ session });
     if (!session) {
       unsubscribe();
-      set({ status: "signedOut", profile: null, membership: null, team: null, members: [], config: null, today: null });
+      set({ status: "signedOut", profile: null, membership: null, team: null, members: [], config: null, today: null, teamDay: null });
     } else if (session.user.id !== prev || event === "SIGNED_IN") {
       // Supabase calls this inside its auth lock; load outside it.
       setTimeout(() => void loadAll().catch(() => set({ status: "ready" })), 0);
@@ -141,8 +149,6 @@ export function boot() {
   // Coming back to the tab: catch up on anything missed while it slept.
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible" || !get().session) return;
-    const t = get().team;
-    if (t && get().todayKey !== dayKey()) void loadToday(t.id);
     void loadAll().catch(() => {});
   });
 }
@@ -189,6 +195,32 @@ export async function saveRun(run: { origin: LatLng; filters: LunchFilters; sugg
   if (!t) throw new Error("You need to be in a team to run a search.");
   const row = must(await supabase.from("team_runs").insert({ team_id: t.id, ...run }).select("*").single()) as TeamRun;
   set({ today: row, todayKey: row.day });
+}
+
+/** Adds or removes a place from today's contenders. Shows the change at once, then
+ *  takes the team's list back from the database. */
+export async function setContender(placeId: string, on: boolean) {
+  const t = get().team;
+  if (!t) return;
+  const cur = get().teamDay;
+  const base: TeamDay = cur ?? { team_id: t.id, day: dayKey(), contenders: [], pick: null, picked_by: null, picked_by_name: "", picked_at: null };
+  const optimistic = on ? (base.contenders.includes(placeId) ? base.contenders : [...base.contenders, placeId]) : base.contenders.filter((x) => x !== placeId);
+  set({ teamDay: { ...base, contenders: optimistic } });
+  try {
+    const contenders = must(await supabase.rpc("set_contender", { p_place: placeId, p_on: on })) as string[];
+    set((s) => ({ teamDay: s.teamDay ? { ...s.teamDay, contenders } : s.teamDay }));
+  } catch (e) {
+    set({ teamDay: cur });
+    throw e;
+  }
+}
+
+/** Saves the place a game picked as the team's pick for today. */
+export async function savePick(pick: Suggestion) {
+  const t = get().team;
+  if (!t) return;
+  must(await supabase.rpc("save_pick", { p_pick: pick }));
+  await loadTeamDay(t.id);
 }
 
 export async function saveName(name: string) {

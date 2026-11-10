@@ -60,6 +60,9 @@ export function normalizeFilters(raw: unknown): LunchFilters {
 
 export interface PriceRange { start: number; end: number | null; currency: string }
 
+/** A Google photo of a place, with the author credit Google requires next to it. */
+export interface PlacePhoto { uri: string; author: string; authorUri: string }
+
 /** One place from Google, reduced to what the picker uses. */
 export interface Candidate {
   id: string;
@@ -77,6 +80,8 @@ export interface Candidate {
   type: string;
   address: string;
   mapsUrl: string;
+  /** Up to 3 photos; missing on lists saved before photos were added. */
+  photos?: PlacePhoto[];
 }
 
 const R_EARTH = 6_371_000;
