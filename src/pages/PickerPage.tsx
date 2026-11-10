@@ -4,17 +4,18 @@
 // red Let's choose button takes the Contenders to a game.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Dices, ExternalLink, List, LocateFixed, MapPinned, Minus, PartyPopper, Plus, RotateCw, Star, X } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Dices, ExternalLink, List, LocateFixed, MapPin, MapPinned, Minus, PartyPopper, Plus, RotateCw, Star, X } from "lucide-react";
 import {
   COUNT, PRICE_BANDS, RADIUS, budgetPhrase, fmtBudget, fmtDistance, normalizeFilters, pickLunch, walkMinutes,
   type BandId, type LunchFilters, type Suggestion,
 } from "../lib/lunch.ts";
 import { checkDay, saveFilters, saveRun, setContender, useApp, type Member } from "../lib/store.ts";
-import { freshPosition, locate, setManualPosition, useGeo, type Geo } from "../lib/geo.ts";
+import { choosePlace, freshPosition, locate, switchToDevice, useGeo } from "../lib/geo.ts";
 import { mapsKey, searchLunch, withPhotos } from "../lib/google.ts";
 import { LunchMap, type MapStatus } from "../components/LunchMap.tsx";
 import { PhotoStrip } from "../components/Photos.tsx";
 import { RatingLine, WalkLine, priceText } from "../components/Bits.tsx";
+import { WhereBar } from "../components/WhereBar.tsx";
 import type { Team, TeamDay, TeamRun } from "../lib/types.ts";
 
 const same = (a: unknown, b: unknown) => JSON.stringify(normalizeFilters(a)) === JSON.stringify(normalizeFilters(b));
@@ -84,6 +85,7 @@ export function PickerPage() {
   const [view, setView] = useState<View>(NO_VIEW);
   const [poolError, setPoolError] = useState("");
   const [hint, setHint] = useState(false);
+  const [picking, setPicking] = useState(false);
   const [mapStatus, setMapStatus] = useState<{ s: MapStatus; error?: string }>({ s: "loading" });
 
   const apiKey = config?.google_maps_key ?? "";
@@ -105,7 +107,8 @@ export function PickerPage() {
   const list = today?.suggestions ?? [];
   const pool = list.filter((s) => poolIds.has(s.id));
   const visible = applyView(list, view, poolIds);
-  const tapToSet = geo.status === "error" || geo.manual;
+  // Taps on the map set the location only in pick mode, or while no location is known.
+  const tapToSet = picking || (geo.status === "error" && !geo.pos);
   // Editing (or no list yet): the circle is around you with the radius being edited.
   // Otherwise: around the spot today's search was run from, with that run's radius.
   const showRun = !!today && !filtersOpen;
@@ -119,10 +122,12 @@ export function PickerPage() {
     setConfirm(false); setRunError(""); setRunning(true);
     try {
       const origin = await freshPosition();
-      if (!origin) throw new Error("Your location is needed first. Allow location for this site, or tap the map to set where you are.");
+      if (!origin) throw new Error("Set where you are first: type an address or pick a spot on the map.");
       const { candidates, places } = await searchLunch(origin, filters);
       const { suggestions, summary } = pickLunch(candidates, filters, origin);
-      await saveRun({ origin, filters, suggestions: await withPhotos(suggestions, places), summary });
+      const where = useGeo.getState();
+      const label = where.manual ? where.label : "";
+      await saveRun({ origin: { ...origin, label }, filters, suggestions: await withPhotos(suggestions, places), summary });
       setFiltersOpen(false); setListOpen(true);
     } catch (e) {
       setRunError(e instanceof Error ? e.message : String(e));
@@ -145,10 +150,17 @@ export function PickerPage() {
           <>
             <LunchMap apiKey={apiKey} mapId={config?.map_id ?? ""} me={geo.pos} center={center} radiusM={radiusM} padding={padding}
               suggestions={today && !stale ? visible : []} selected={selected} onSelect={(id) => { setSelected(id); setListOpen(true); }}
-              onTap={tapToSet ? setManualPosition : undefined} onStatus={(s, error) => setMapStatus({ s, error })} />
+              onTap={tapToSet ? (pos) => { choosePlace(pos, "Spot on the map", "map"); if (picking) { setPicking(false); setListOpen(true); } } : undefined}
+              onStatus={(s, error) => setMapStatus({ s, error })} />
+            {picking && (
+              <div className="pick-banner" role="status">
+                <MapPin size={16} aria-hidden="true" />Tap the map where you are
+                <button className="btn quiet small" onClick={() => { setPicking(false); setListOpen(true); }}>Cancel</button>
+              </div>
+            )}
             {mapStatus.s !== "ready" && <MapNote status={mapStatus.s} error={mapStatus.error} admin={profile.role === "admin"} />}
-            {ready && (
-              <button className="map-btn locate" onClick={() => void locate()} disabled={geo.status === "locating"} aria-label="Use my current location">
+            {ready && !picking && (
+              <button className="map-btn locate" onClick={() => void switchToDevice()} disabled={geo.status === "locating"} aria-label="Use my device location">
                 <LocateFixed size={18} aria-hidden="true" />
               </button>
             )}
@@ -177,7 +189,7 @@ export function PickerPage() {
         </header>
 
         <div className="sheet-body">
-          <LocationLine geo={geo} tapToSet={tapToSet && ready} />
+          <WhereBar geo={geo} ready={ready} onPickOnMap={() => { setPicking(true); if (narrow) setListOpen(false); }} />
           <TodaysPick day={teamDay} me={profile.id} />
 
           <section className={`lp-filters${filtersOpen ? " open" : ""}`}>
@@ -205,7 +217,7 @@ export function PickerPage() {
               {running ? "Searching" : "Filter"}
             </button>
           )}
-          {ready && !geo.pos && geo.status !== "locating" && <p className="hint lp-center">Your location is needed before you can filter.</p>}
+          {ready && !geo.pos && geo.status !== "locating" && <p className="hint lp-center">Set where you are (above) before you filter.</p>}
           {runError && <div className="alert err">{runError}</div>}
 
           <Results today={today} stale={stale} running={running} me={profile.id} list={list} visible={visible} view={view} setView={setView}
@@ -283,18 +295,6 @@ function MapNote({ status, error, admin }: { status: MapStatus; error?: string; 
   );
 }
 
-/** Shown only when something needs attention: location blocked, or a spot set by tapping the map. */
-function LocationLine({ geo, tapToSet }: { geo: Geo; tapToSet: boolean }) {
-  if (!geo.error && !geo.manual) return null;
-  return (
-    <div className="lp-loc">
-      {geo.manual && !geo.error && <span>Using the spot you tapped on the map.{tapToSet && " Tap again to move it."}</span>}
-      {geo.error && <span className="lp-locerr">{geo.error}</span>}
-      {geo.status !== "locating" && <button className="linkbtn small" onClick={() => void locate()}>Try my location again</button>}
-    </div>
-  );
-}
-
 function FilterForm({ f, onChange }: { f: LunchFilters; onChange: (f: LunchFilters) => void }) {
   const toggleBand = (id: BandId) => onChange({ ...f, bands: f.bands.includes(id) ? f.bands.filter((b) => b !== id) : [...f.bands, id] });
   return (
@@ -356,7 +356,7 @@ function Results(props: {
     <div className={`lp-results${stale || running ? " stale" : ""}`}>
       <div className="lp-runhead">
         <b>Today's list</b>
-        <span className="muted small">Found by {by} at {clock(today.run_at)}{today.run_by === me ? "" : ", from their location"}. Tick places to make them contenders.</span>
+        <span className="muted small">Found by {by} at {clock(today.run_at)}{today.origin.label ? `, around ${today.origin.label}` : today.run_by === me ? "" : ", from their location"}. Tick places to make them contenders.</span>
       </div>
       {stale && <div className="lp-stalenote">The team filters changed since this list was made. Press Filter to apply them.</div>}
       {list.length > 0 && (

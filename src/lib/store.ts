@@ -190,7 +190,7 @@ export async function saveFilters(filters: LunchFilters) {
   set({ team: row });
 }
 
-export async function saveRun(run: { origin: LatLng; filters: LunchFilters; suggestions: Suggestion[]; summary: RunSummary }) {
+export async function saveRun(run: { origin: LatLng & { label?: string }; filters: LunchFilters; suggestions: Suggestion[]; summary: RunSummary }) {
   const t = get().team;
   if (!t) throw new Error("You need to be in a team to run a search.");
   const row = must(await supabase.from("team_runs").insert({ team_id: t.id, ...run }).select("*").single()) as TeamRun;

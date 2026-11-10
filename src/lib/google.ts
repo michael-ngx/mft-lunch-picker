@@ -152,6 +152,36 @@ export async function withPhotos<T extends Candidate>(list: T[], places: SearchR
   }));
 }
 
+// ---------- address search ----------
+
+export interface AddressHit { id: string; main: string; secondary: string; prediction: google.maps.places.PlacePrediction }
+
+const MONTREAL: LatLng = { lat: 45.5017, lng: -73.5673 };
+// One session per search: suggestions while typing, then the details of the chosen one.
+let session: google.maps.places.AutocompleteSessionToken | null = null;
+
+/** Google's address suggestions for what has been typed, closest to `near` first. */
+export async function suggestAddresses(input: string, near: LatLng | null): Promise<AddressHit[]> {
+  const { AutocompleteSuggestion, AutocompleteSessionToken } = (await google.maps.importLibrary("places")) as google.maps.PlacesLibrary;
+  if (!session) session = new AutocompleteSessionToken();
+  const { suggestions } = await AutocompleteSuggestion.fetchAutocompleteSuggestions({
+    input, sessionToken: session, locationBias: { center: near ?? MONTREAL, radius: 30_000 },
+  });
+  return suggestions
+    .map((x) => x.placePrediction)
+    .filter((p): p is google.maps.places.PlacePrediction => !!p)
+    .map((p) => ({ id: p.placeId, main: p.mainText?.text ?? p.text.text, secondary: p.secondaryText?.text ?? "", prediction: p }));
+}
+
+/** The position and a short label for a chosen suggestion. */
+export async function resolveAddress(hit: AddressHit): Promise<{ pos: LatLng; label: string }> {
+  const place = hit.prediction.toPlace();
+  await place.fetchFields({ fields: ["location", "formattedAddress", "displayName"] });
+  session = null;
+  if (!place.location) throw new Error("Google has no position for that address. Try another one.");
+  return { pos: { lat: place.location.lat(), lng: place.location.lng() }, label: hit.main || place.formattedAddress || place.displayName || "Chosen address" };
+}
+
 function explain(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e ?? "Unknown error");
   if (/PERMISSION_DENIED|not authorized|API_KEY|has not been used|disabled/i.test(msg))
