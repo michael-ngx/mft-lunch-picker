@@ -5,8 +5,8 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ChevronDown, ExternalLink, LocateFixed, MapPinned, Minus, Plus, RotateCw, Star } from "lucide-react";
 import {
-  COUNT, DROP_LABEL, PRICE_BANDS, PRICE_LEVEL_LABEL, RADIUS, budgetPhrase, fmtBudget, fmtDistance, fmtPrice, normalizeFilters, pickLunch, walkMinutes,
-  type BandId, type DropReason, type LunchFilters, type Suggestion,
+  COUNT, PRICE_BANDS, PRICE_LEVEL_LABEL, RADIUS, budgetPhrase, fmtBudget, fmtDistance, fmtPrice, normalizeFilters, pickLunch, walkMinutes,
+  type BandId, type LunchFilters, type Suggestion,
 } from "../lib/lunch.ts";
 import { checkDay, saveFilters, saveRun, useApp, type Member } from "../lib/store.ts";
 import { freshPosition, locate, setManualPosition, useGeo, type Geo } from "../lib/geo.ts";
@@ -184,18 +184,14 @@ function MapNote({ status, error, admin }: { status: MapStatus; error?: string; 
   );
 }
 
+/** Shown only when something needs attention: location blocked, or a spot set by tapping the map. */
 function LocationLine({ geo, tapToSet }: { geo: Geo; tapToSet: boolean }) {
-  let text = "";
-  if (geo.status === "locating") text = "Finding your location…";
-  else if (geo.pos && geo.manual) text = "Using the spot you tapped on the map.";
-  else if (geo.pos) text = `Using your location${geo.accuracyM ? ` (within ${fmtDistance(geo.accuracyM)})` : ""}${geo.at ? `, updated at ${clock(geo.at)}` : ""}.`;
-  else if (geo.status !== "error") text = "Waiting for your location…";
+  if (!geo.error && !geo.manual) return null;
   return (
     <div className="lp-loc">
-      {text && <span>{text}</span>}
+      {geo.manual && !geo.error && <span>Using the spot you tapped on the map.{tapToSet && " Tap again to move it."}</span>}
       {geo.error && <span className="lp-locerr">{geo.error}</span>}
-      {tapToSet && !geo.error && geo.manual && <span className="hint">Tap the map again to move it.</span>}
-      {geo.status !== "locating" && (geo.error || geo.manual) && <button className="linkbtn small" onClick={() => void locate()}>Try my location again</button>}
+      {geo.status !== "locating" && <button className="linkbtn small" onClick={() => void locate()}>Try my location again</button>}
     </div>
   );
 }
@@ -227,7 +223,6 @@ function FilterForm({ f, onChange }: { f: LunchFilters; onChange: (f: LunchFilte
         <label htmlFor="lp-rating" className="lp-lab">Minimum rating <b>{f.minRating ? <>{f.minRating.toFixed(1)}<Star size={13} aria-hidden="true" className="lp-star" /> and up</> : "Any"}</b></label>
         <input id="lp-rating" type="range" className="lp-range" min={0} max={4.9} step={0.1} value={f.minRating}
           onChange={(e) => onChange({ ...f, minRating: Number(e.target.value) })} />
-        <span className="hint">Google Maps rating. Places with no rating are left out when a minimum is set.</span>
       </div>
 
       <div className="field">
@@ -251,8 +246,6 @@ function Results({ today, stale, running, selected, onSelect, me }: {
     if (running) return <div className="lp-idle"><span className="loading-dots"><i /><i /><i /></span> Searching Google Maps</div>;
     return <p className="lp-idle">No list yet today. Check the team filters, then press Run. Everyone in your team will see the same list.</p>;
   }
-  const s = today.summary;
-  const dropped = (Object.entries(s.dropped) as [DropReason, number][]).sort((a, b) => b[1] - a[1]);
   const by = today.run_by === me ? "you" : today.run_by_name || "a teammate";
   return (
     <div className={`lp-results${stale || running ? " stale" : ""}`}>
@@ -261,10 +254,6 @@ function Results({ today, stale, running, selected, onSelect, me }: {
         <span className="muted small">Run by {by} at {clock(today.run_at)}{today.run_by === me ? "" : ", from their location"}.</span>
       </div>
       {stale && <div className="lp-stalenote">The team filters changed since this run. Press Run again to apply them.</div>}
-      <p className="lp-sum">
-        <b>{today.suggestions.length}</b> of {s.found} place{s.found === 1 ? "" : "s"} found nearby{today.suggestions.length < s.matched ? ` (${s.matched} matched)` : ""}.
-        {dropped.length > 0 && <span className="muted"> Left out: {dropped.map(([k, n]) => `${n} ${DROP_LABEL[k]}`).join(", ")}.</span>}
-      </p>
       {today.suggestions.length === 0 ? (
         <p className="lp-idle">No place passed every filter. Try a larger radius, a wider budget or a lower minimum rating.</p>
       ) : (

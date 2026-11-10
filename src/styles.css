@@ -162,7 +162,6 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
 .lp-runhead { display: flex; flex-direction: column; gap: 2px; }
 .lp-runhead b { font-size: 16px; }
 .lp-stalenote { background: var(--warn-soft); color: var(--warn); padding: 9px 12px; border-radius: 10px; font-size: 13.5px; font-weight: 600; }
-.lp-sum { font-size: 13.5px; }
 .lp-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .lp-item { background: #fff; border: 1px solid var(--line); border-radius: 12px; transition: border-color 0.12s, box-shadow 0.12s; scroll-margin: 12px; }
 .lp-item:hover { border-color: var(--line-strong); }
