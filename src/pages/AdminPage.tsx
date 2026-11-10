@@ -9,7 +9,7 @@ import { BackLink } from "../components/Bits.tsx";
 
 interface Row extends Membership { profile: Profile | undefined }
 
-const SITES = ["https://mft-lunch-picker.vercel.app/*", "http://localhost:5173/*"];
+const SITES = ["https://mft-lunch.michael-ngx.com/*", "https://mft-lunch-picker.vercel.app/*", "http://localhost:5173/*"];
 
 function when(iso: string) {
   return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });

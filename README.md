@@ -2,7 +2,7 @@
 
 One shared list of lunch places a day for each team, from Google Maps, near where you are.
 
-Live: https://mft-lunch-picker.vercel.app
+Live: https://mft-lunch.michael-ngx.com (also https://mft-lunch-picker.vercel.app, which some company networks block)
 
 ## How it works
 
@@ -40,7 +40,7 @@ The local site uses the same Supabase project as the live one. For the map, the 
 ## Supabase settings set in its dashboard
 
 - Authentication, Sign In / Providers, Email: **Confirm email off**. The admin approves everyone, and Supabase's built-in email sends only a few messages an hour.
-- Authentication, URL Configuration: Site URL `https://mft-lunch-picker.vercel.app`.
+- Authentication, URL Configuration: Site URL `https://mft-lunch.michael-ngx.com`.
 
 ## Contributing
 
