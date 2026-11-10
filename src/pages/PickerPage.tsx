@@ -17,6 +17,7 @@ import { PhotoStrip } from "../components/Photos.tsx";
 import { RatingLine, WalkLine, priceText } from "../components/Bits.tsx";
 import { WhereBar } from "../components/WhereBar.tsx";
 import type { Team, TeamDay, TeamRun } from "../lib/types.ts";
+import { DEV_MAPS_KEY } from "../lib/config.ts";
 
 const same = (a: unknown, b: unknown) => JSON.stringify(normalizeFilters(a)) === JSON.stringify(normalizeFilters(b));
 export const clock = (iso: string | number) => new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
@@ -88,7 +89,7 @@ export function PickerPage() {
   const [picking, setPicking] = useState(false);
   const [mapStatus, setMapStatus] = useState<{ s: MapStatus; error?: string }>({ s: "loading" });
 
-  const apiKey = config?.google_maps_key ?? "";
+  const apiKey = DEV_MAPS_KEY || config?.google_maps_key || "";
   const keyChanged = !!mapsKey() && !!apiKey && mapsKey() !== apiKey;
   const canMap = !!apiKey && !keyChanged;
   const ready = canMap && mapStatus.s === "ready";

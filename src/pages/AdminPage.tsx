@@ -9,7 +9,8 @@ import { BackLink } from "../components/Bits.tsx";
 
 interface Row extends Membership { profile: Profile | undefined }
 
-const SITES = ["https://mft-lunch.michael-ngx.com/*", "https://mft-lunch-picker.vercel.app/*", "http://localhost:5173/*"];
+// Only the live addresses: anyone developing on their own computer uses their own key (see README).
+const SITES = ["https://mft-lunch.michael-ngx.com/*", "https://mft-lunch-picker.vercel.app/*"];
 
 function when(iso: string) {
   return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
@@ -142,10 +143,11 @@ function GoogleSettings() {
           <li>In APIs and services, Credentials, click Create credentials, API key.</li>
           <li>Edit the key. Under Application restrictions choose <b>Websites</b> and add:
             <ul>{SITES.map((s) => <li key={s}><code>{s}</code></li>)}</ul></li>
-          <li>Under API restrictions choose <b>Restrict key</b>, tick Maps JavaScript API and Places API (New), and save.</li>
+          <li>Under API restrictions choose <b>Restrict key</b>, tick only Maps JavaScript API and Places API (New), and save.</li>
           <li>Paste the key above and click Save.</li>
         </ol>
-        <p className="muted small">Cost: each Run makes three searches (two Nearby Search, one Text Search). Google gives about 1,000 free calls a month for each, so about 500 runs a month are free. To rule out a surprise bill, set a daily cap: Places API (New), Quotas, requests per day, for example 60.</p>
+        <p className="muted small">Don't add localhost: every computer is localhost, so anyone with the key could use it from their own machine. People developing locally put their own key in <code>.env.local</code> instead.</p>
+        <p className="muted small">Cost: each Filter makes three searches (two Nearby Search, one Text Search). Google gives about 1,000 free calls a month for each, so about 500 runs a month are free. To rule out a surprise bill, set a daily cap: Places API (New), Quotas, requests per day, for example 60.</p>
       </details>
     </section>
   );

@@ -21,7 +21,7 @@ Live: https://mft-lunch.michael-ngx.com (also https://mft-lunch-picker.vercel.ap
 
 - React + TypeScript + Vite, deployed on Vercel as a static site.
 - Supabase (project `mft-lunch-picker`) for sign-in, data and live updates. Schema and access rules: `supabase/migrations/0001_init.sql`. Every table has row-level security: people see only their own team's data, only approved members can read the Google key, only the admin approves people or edits the key, and the database itself records who ran a search, who changed the filters and who approved whom.
-- Google Maps JavaScript API and Places API (New), called from the browser of whoever presses Filter, with the key stored in the database (`app_config`).
+- Google Maps JavaScript API and Places API (New), called from the browser of whoever presses Filter, with the key stored in the database (`app_config`). The key is limited to the live addresses and to those two APIs.
 - Contenders and Today's pick: table `team_days` (one row per team per day), changed only through the database functions `set_contender` and `save_pick` (`supabase/migrations/0002_contenders_and_pick.sql`), so simultaneous clicks don't overwrite each other.
 - Address search uses Places Autocomplete (New) and a Place Details call for the chosen address (Essentials level, about 10,000 free a month each).
 - Photos: Google bills each photo it serves (Place Details Photos: 1,000 free a month, then about $7 per 1,000). Each Filter fetches up to 3 photos for each place on the list and, where Google allows, stores the image's final address with the list, so teammates viewing the list don't add photo charges. With 8 places that is about 24 photo calls per Filter.
@@ -37,7 +37,15 @@ npm test           # filter and ranking rules
 npm run typecheck
 ```
 
-The local site uses the same Supabase project as the live one. For the map, the Google key's website restrictions need `http://localhost:5173/*`.
+The local site uses the same Supabase project as the live one, so you sign in with your normal account (an admin approves you as usual).
+
+The team's Google Maps key only works on the live addresses, not on `localhost`. For the map and search on your own computer, create your own key in Google Cloud (Maps JavaScript API and Places API (New), restricted to `http://localhost:5173/*`; Google's free monthly allowance covers development) and put it in `.env.local`:
+
+```sh
+echo "VITE_GOOGLE_MAPS_KEY=your-key" > .env.local
+```
+
+The live build ignores this setting.
 
 ## Supabase settings set in its dashboard
 

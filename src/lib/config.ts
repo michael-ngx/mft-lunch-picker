@@ -5,3 +5,8 @@ export const SUPABASE_PUBLISHABLE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABL
 
 /** Team days follow Montréal time. */
 export const TEAM_TZ = "America/Toronto";
+
+/** For development on your own computer only: your own Google Maps key, from .env.local.
+ *  The team's key works only on the live site, so local copies need their own. Ignored in
+ *  the live build. */
+export const DEV_MAPS_KEY: string = import.meta.env.DEV ? (import.meta.env.VITE_GOOGLE_MAPS_KEY ?? "") : "";
