@@ -6,8 +6,8 @@ import { create } from "zustand";
 import type { RealtimeChannel, Session } from "@supabase/supabase-js";
 import { must, supabase } from "./supabase.ts";
 import { TEAM_TZ } from "./config.ts";
-import type { AppConfig, Membership, Profile, Team, TeamDay, TeamRun } from "./types.ts";
-import type { LatLng, LunchFilters, RunSummary, Suggestion } from "./lunch.ts";
+import type { AppConfig, Ban, Membership, Profile, Team, TeamDay, TeamRun } from "./types.ts";
+import { toRef, type LatLng, type LunchFilters, type PlaceRef, type PlaceStat, type RunSummary, type Suggestion } from "./lunch.ts";
 
 export interface Member extends Profile { status: Membership["status"] }
 
@@ -25,12 +25,16 @@ interface State {
   todayKey: string;
   /** Today's contenders and the game's pick, shared by the team. */
   teamDay: TeamDay | null;
+  /** The team's never-again list. */
+  bans: Ban[];
+  /** Goes up whenever any of the team's days changes, so the History page reloads. */
+  dayRev: number;
   /** Admin only: requests waiting for approval. */
   pending: number;
 }
 
 export const useApp = create<State>(() => ({
-  status: "loading", session: null, profile: null, membership: null, teams: [], team: null, members: [], config: null, today: null, todayKey: "", teamDay: null, pending: 0,
+  status: "loading", session: null, profile: null, membership: null, teams: [], team: null, members: [], config: null, today: null, todayKey: "", teamDay: null, bans: [], dayRev: 0, pending: 0,
 }));
 const set = useApp.setState;
 const get = useApp.getState;
@@ -60,6 +64,11 @@ export function checkDay() {
 async function loadTeamDay(teamId: string) {
   const row = must(await supabase.from("team_days").select("*").eq("team_id", teamId).eq("day", dayKey()).maybeSingle());
   set({ teamDay: (row as TeamDay | null) ?? null });
+}
+
+async function loadBans(teamId: string) {
+  const rows = must(await supabase.from("team_bans").select("*").eq("team_id", teamId).is("lifted_at", null).order("banned_at", { ascending: false }));
+  set({ bans: (rows ?? []) as Ban[] });
 }
 
 async function loadToday(teamId: string) {
@@ -92,8 +101,8 @@ export async function loadAll() {
     const cfg = must(await supabase.from("app_config").select("google_maps_key, map_id, updated_at").maybeSingle());
     set({ config: cfg as AppConfig | null });
   } else set({ config: null });
-  if (team) await Promise.all([loadToday(team.id), loadMembers(team.id), loadTeamDay(team.id)]);
-  else set({ today: null, members: [], teamDay: null });
+  if (team) await Promise.all([loadToday(team.id), loadMembers(team.id), loadTeamDay(team.id), loadBans(team.id)]);
+  else set({ today: null, members: [], teamDay: null, bans: [] });
   const admin = (profile as Profile | null)?.role === "admin";
   if (admin) await loadPending();
   set({ status: "ready" });
@@ -128,7 +137,11 @@ function listen(uid: string, teamId: string | null, admin: boolean) {
         set((s) => ({ team: s.team && s.team.id === t.id ? { ...s.team, ...t } : s.team }));
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "memberships", filter: `team_id=eq.${teamId}` }, () => void loadMembers(teamId))
-      .on("postgres_changes", { event: "*", schema: "public", table: "team_days", filter: `team_id=eq.${teamId}` }, () => void loadTeamDay(teamId))
+      .on("postgres_changes", { event: "*", schema: "public", table: "team_days", filter: `team_id=eq.${teamId}` }, () => {
+        set((s) => ({ dayRev: s.dayRev + 1 }));
+        void loadTeamDay(teamId);
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "team_bans", filter: `team_id=eq.${teamId}` }, () => void loadBans(teamId))
       .subscribe(),
   );
 }
@@ -140,7 +153,7 @@ export function boot() {
     set({ session });
     if (!session) {
       unsubscribe();
-      set({ status: "signedOut", profile: null, membership: null, team: null, members: [], config: null, today: null, teamDay: null });
+      set({ status: "signedOut", profile: null, membership: null, team: null, members: [], config: null, today: null, teamDay: null, bans: [] });
     } else if (session.user.id !== prev || event === "SIGNED_IN") {
       // Supabase calls this inside its auth lock; load outside it.
       setTimeout(() => void loadAll().catch(() => set({ status: "ready" })), 0);
@@ -197,13 +210,18 @@ export async function saveRun(run: { origin: LatLng & { label?: string }; filter
   set({ today: row, todayKey: row.day });
 }
 
+const emptyDay = (teamId: string): TeamDay => ({
+  team_id: teamId, day: dayKey(), contenders: [], pick: null, picked_by: null, picked_by_name: "", picked_at: null,
+  played: [], players: [], played_at: null, went: null, went_by: null, went_by_name: "", went_at: null,
+});
+
 /** Adds or removes a place from today's contenders. Shows the change at once, then
  *  takes the team's list back from the database. */
 export async function setContender(placeId: string, on: boolean) {
   const t = get().team;
   if (!t) return;
   const cur = get().teamDay;
-  const base: TeamDay = cur ?? { team_id: t.id, day: dayKey(), contenders: [], pick: null, picked_by: null, picked_by_name: "", picked_at: null };
+  const base: TeamDay = cur ?? emptyDay(t.id);
   const optimistic = on ? (base.contenders.includes(placeId) ? base.contenders : [...base.contenders, placeId]) : base.contenders.filter((x) => x !== placeId);
   set({ teamDay: { ...base, contenders: optimistic } });
   try {
@@ -221,6 +239,60 @@ export async function savePick(pick: Suggestion) {
   if (!t) return;
   must(await supabase.rpc("save_pick", { p_pick: pick }));
   await loadTeamDay(t.id);
+}
+
+/** Logs a game being played with these contenders. Only players can then set
+ *  where the team is going. */
+export async function logGame(places: Suggestion[]) {
+  must(await supabase.rpc("log_game", { p_places: places.map(toRef) }));
+}
+
+/** Sets where the team is going today (null clears it). */
+export async function confirmWent(place: Suggestion | PlaceRef | null) {
+  const t = get().team;
+  if (!t) return;
+  must(await supabase.rpc("confirm_went", { p_place: place ? toRef(place) : null }));
+  await loadTeamDay(t.id);
+}
+
+/** Puts a place on (or takes it off) the team's never-again list. Shows the change at once. */
+export async function setBan(place: { id: string; name: string; address: string }, on: boolean) {
+  const t = get().team;
+  if (!t) return;
+  const before = { bans: get().bans, teamDay: get().teamDay };
+  const me = get().profile;
+  set((s) => ({
+    bans: on
+      ? [{ team_id: t.id, place_id: place.id, name: place.name, address: place.address, banned_by: me?.id ?? null, banned_by_name: me?.display_name ?? "", banned_at: new Date().toISOString() }, ...s.bans.filter((b) => b.place_id !== place.id)]
+      : s.bans.filter((b) => b.place_id !== place.id),
+    teamDay: on && s.teamDay ? { ...s.teamDay, contenders: s.teamDay.contenders.filter((x) => x !== place.id) } : s.teamDay,
+  }));
+  try {
+    must(await supabase.rpc("set_ban", { p_place: place.id, p_name: place.name, p_address: place.address, p_on: on }));
+    await loadBans(t.id);
+  } catch (e) {
+    set(before);
+    throw e;
+  }
+}
+
+/** The team's played days, newest first. */
+export async function loadHistory(): Promise<TeamDay[]> {
+  const t = get().team;
+  if (!t) return [];
+  const rows = must(await supabase.from("team_days").select("*").eq("team_id", t.id).not("played_at", "is", null).order("day", { ascending: false }).limit(120));
+  return (rows ?? []) as TeamDay[];
+}
+
+interface StatRow { place_id: string; shown_today: number; shown_days: number; last_shown: string | null; played_days: number; last_played: string | null; went_days: number; last_went: string | null }
+
+/** Each place's history with the team, for the suggestions. */
+export async function fetchPlaceStats(): Promise<Map<string, PlaceStat>> {
+  const rows = (must(await supabase.rpc("place_stats")) ?? []) as StatRow[];
+  return new Map(rows.map((r) => [r.place_id, {
+    shownToday: r.shown_today, shownDays: r.shown_days, lastShown: r.last_shown,
+    playedDays: r.played_days, lastPlayed: r.last_played, wentDays: r.went_days, lastWent: r.last_went,
+  }]));
 }
 
 export async function saveName(name: string) {

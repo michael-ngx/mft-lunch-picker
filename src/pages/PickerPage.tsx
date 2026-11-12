@@ -1,22 +1,23 @@
 // The picker: a full-screen map with the team's list floating on the left (a
-// bottom sheet on phones). Filter finds places that pass the team filters and
-// saves one list for the whole team; ticking places makes them Contenders; the
-// red Let's choose button takes the Contenders to a game.
+// bottom sheet on phones). Filter draws a list of places that pass the team
+// filters and saves it for the whole team; ticking places makes them Contenders;
+// the red Let's choose button takes the Contenders to a game. Never again takes a
+// place off every future list.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Dices, ExternalLink, List, LocateFixed, MapPin, MapPinned, Minus, PartyPopper, Plus, RotateCw, Star, X } from "lucide-react";
+import { Ban, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Dices, ExternalLink, List, LocateFixed, MapPin, MapPinned, Minus, Plus, RotateCw, Star, X } from "lucide-react";
 import {
   COUNT, PRICE_BANDS, RADIUS, budgetPhrase, fmtBudget, fmtDistance, normalizeFilters, pickLunch, walkMinutes,
   type BandId, type LunchFilters, type Suggestion,
 } from "../lib/lunch.ts";
-import { checkDay, saveFilters, saveRun, setContender, useApp, type Member } from "../lib/store.ts";
+import { checkDay, dayKey, fetchPlaceStats, saveFilters, saveRun, setBan, setContender, useApp, type Member } from "../lib/store.ts";
 import { choosePlace, freshPosition, locate, switchToDevice, useGeo } from "../lib/geo.ts";
 import { mapsKey, searchLunch, withPhotos } from "../lib/google.ts";
 import { LunchMap, type MapStatus } from "../components/LunchMap.tsx";
 import { PhotoStrip } from "../components/Photos.tsx";
 import { RatingLine, WalkLine, priceText } from "../components/Bits.tsx";
 import { WhereBar } from "../components/WhereBar.tsx";
-import type { Team, TeamDay, TeamRun } from "../lib/types.ts";
+import type { Team, TeamRun } from "../lib/types.ts";
 import { DEV_MAPS_KEY } from "../lib/config.ts";
 
 const same = (a: unknown, b: unknown) => JSON.stringify(normalizeFilters(a)) === JSON.stringify(normalizeFilters(b));
@@ -70,6 +71,7 @@ export function PickerPage() {
   const team = useApp((s) => s.team)!;
   const today = useApp((s) => s.today);
   const teamDay = useApp((s) => s.teamDay);
+  const bans = useApp((s) => s.bans);
   const config = useApp((s) => s.config);
   const members = useApp((s) => s.members);
   const profile = useApp((s) => s.profile)!;
@@ -82,7 +84,7 @@ export function PickerPage() {
   const [selected, setSelected] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState("");
-  const [confirm, setConfirm] = useState(false);
+  const [undo, setUndo] = useState<{ id: string; name: string; address: string } | null>(null);
   const [view, setView] = useState<View>(NO_VIEW);
   const [poolError, setPoolError] = useState("");
   const [hint, setHint] = useState(false);
@@ -102,10 +104,13 @@ export function PickerPage() {
     if (selected) document.getElementById(`lp-${selected}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [selected]);
   useEffect(() => { if (!hint) return; const t = setTimeout(() => setHint(false), 3500); return () => clearTimeout(t); }, [hint]);
+  useEffect(() => { if (!undo) return; const t = setTimeout(() => setUndo(null), 8000); return () => clearTimeout(t); }, [undo]);
 
   const stale = !!today && !same(today.filters, filters);
   const poolIds = useMemo(() => new Set(teamDay?.contenders ?? []), [teamDay?.contenders]);
-  const list = today?.suggestions ?? [];
+  const bannedIds = useMemo(() => new Set(bans.map((b) => b.place_id)), [bans]);
+  // Places put on the never-again list disappear from today's list for everyone.
+  const list = useMemo(() => (today?.suggestions ?? []).filter((s) => !bannedIds.has(s.id)), [today, bannedIds]);
   const pool = list.filter((s) => poolIds.has(s.id));
   const visible = applyView(list, view, poolIds);
   // Taps on the map set the location only in pick mode, or while no location is known.
@@ -120,15 +125,22 @@ export function PickerPage() {
     : { top: 28, right: 80, bottom: 28, left: listOpen ? 460 : 28 }, [narrow, listOpen]);
 
   const run = async () => {
-    setConfirm(false); setRunError(""); setRunning(true);
+    setRunError(""); setRunning(true);
     try {
       const origin = await freshPosition();
       if (!origin) throw new Error("Set where you are first: type an address or pick a spot on the map.");
-      const { candidates, places } = await searchLunch(origin, filters);
-      const { suggestions, summary } = pickLunch(candidates, filters, origin);
+      // The team's history makes the draw; without it the list is still drawn, just without the labels.
+      const [{ candidates, places, cuisine }, stats] = await Promise.all([
+        searchLunch(origin, filters),
+        fetchPlaceStats().catch(() => null),
+      ]);
+      const picked = pickLunch(candidates, filters, origin, {
+        stats: stats ?? undefined, banned: bannedIds, keep: pool, today: dayKey(),
+      });
+      const suggestions = stats ? picked.suggestions : picked.suggestions.map((s) => ({ ...s, tag: undefined }));
       const where = useGeo.getState();
       const label = where.manual ? where.label : "";
-      await saveRun({ origin: { ...origin, label }, filters, suggestions: await withPhotos(suggestions, places), summary });
+      await saveRun({ origin: { ...origin, label }, filters, suggestions: await withPhotos(suggestions, places), summary: { ...picked.summary, cuisine } });
       setFiltersOpen(false); setListOpen(true);
     } catch (e) {
       setRunError(e instanceof Error ? e.message : String(e));
@@ -143,6 +155,19 @@ export function PickerPage() {
   };
 
   const choose = () => (pool.length >= 2 ? navigate("/choose") : setHint(true));
+
+  const ban = (s: Suggestion) => {
+    const place = { id: s.id, name: s.name, address: s.address };
+    if (selected === s.id) setSelected(null);
+    setUndo(place);
+    void setBan(place, true).catch((e) => { setUndo(null); setPoolError(e instanceof Error ? e.message : String(e)); });
+  };
+  const unban = () => {
+    if (!undo) return;
+    const place = undo;
+    setUndo(null);
+    void setBan(place, false).catch((e) => setPoolError(e instanceof Error ? e.message : String(e)));
+  };
 
   return (
     <main className="picker">
@@ -191,7 +216,6 @@ export function PickerPage() {
 
         <div className="sheet-body">
           <WhereBar geo={geo} ready={ready} onPickOnMap={() => { setPicking(true); if (narrow) setListOpen(false); }} />
-          <TodaysPick day={teamDay} me={profile.id} />
 
           <section className={`lp-filters${filtersOpen ? " open" : ""}`}>
             <button className="lp-filters-head" onClick={() => setFiltersOpen(!filtersOpen)} aria-expanded={filtersOpen}>
@@ -205,26 +229,24 @@ export function PickerPage() {
             </>}
           </section>
 
-          {confirm ? (
-            <div className="lp-confirm">
-              <p>This replaces today's list for everyone in {team.name}. Contenders that aren't on the new list drop out.</p>
-              <div className="row">
-                <button className="btn" onClick={() => void run()}>Filter again</button>
-                <button className="btn quiet" onClick={() => setConfirm(false)}>Cancel</button>
-              </div>
-            </div>
-          ) : (
-            <button className="btn lp-run" onClick={() => (today ? setConfirm(true) : void run())} disabled={!ready || running || !geo.pos}>
-              {running ? "Searching" : "Filter"}
-            </button>
-          )}
+          <button className="btn lp-run" onClick={() => void run()} disabled={!ready || running || !geo.pos}>
+            {running ? "Searching" : "Filter"}
+          </button>
           {ready && !geo.pos && geo.status !== "locating" && <p className="hint lp-center">Set where you are (above) before you filter.</p>}
           {runError && <div className="alert err">{runError}</div>}
 
           <Results today={today} stale={stale} running={running} me={profile.id} list={list} visible={visible} view={view} setView={setView}
-            poolIds={poolIds} selected={selected} onSelect={setSelected} onToggle={toggle} poolError={poolError} />
+            poolIds={poolIds} selected={selected} onSelect={setSelected} onToggle={toggle} onBan={ban} poolError={poolError} teamName={team.name} />
         </div>
       </aside>
+
+      {undo && (
+        <div className="toast" role="status">
+          <span><b>{undo.name}</b> won't be suggested again.</span>
+          <button className="linkbtn" onClick={unban}>Undo</button>
+          <button className="toast-x" onClick={() => setUndo(null)} aria-label="Dismiss"><X size={15} aria-hidden="true" /></button>
+        </div>
+      )}
 
       {!listOpen && !narrow && (
         <button className="sheet-tab" onClick={() => setListOpen(true)}><List size={17} aria-hidden="true" />Show list<ChevronRight size={16} aria-hidden="true" /></button>
@@ -252,30 +274,6 @@ function summary(f: LunchFilters): string {
     `${f.count} result${f.count === 1 ? "" : "s"}`,
     f.openNow ? "open now" : "",
   ].filter(Boolean).join(" · ");
-}
-
-function TodaysPick({ day, me }: { day: TeamDay | null; me: string }) {
-  if (!day?.pick) return null;
-  const p = day.pick;
-  const by = day.picked_by === me ? "you" : day.picked_by_name || "a teammate";
-  const photo = p.photos?.[0];
-  return (
-    <section className="tp" aria-label="Today's pick">
-      <div className="tp-label"><PartyPopper size={16} aria-hidden="true" />Today's pick</div>
-      <div className="tp-row">
-        {photo ? <img src={photo.uri} alt="" className="tp-img" /> : <span className="tp-img blank" />}
-        <span className="tp-info">
-          <b>{p.name}</b>
-          <RatingLine s={p} />
-          <span className="muted small">Picked by {by}{day.picked_at ? ` at ${clock(day.picked_at)}` : ""}</span>
-        </span>
-      </div>
-      <div className="tp-actions">
-        {p.mapsUrl && <a href={p.mapsUrl} target="_blank" rel="noreferrer" className="btn small">Open in Google Maps<ExternalLink size={14} aria-hidden="true" /></a>}
-        <Link to="/choose" className="btn quiet small">Play again</Link>
-      </div>
-    </section>
-  );
 }
 
 function FiltersBy({ team, members, me }: { team: Team; members: Member[]; me: string }) {
@@ -342,9 +340,10 @@ function FilterForm({ f, onChange }: { f: LunchFilters; onChange: (f: LunchFilte
 function Results(props: {
   today: TeamRun | null; stale: boolean; running: boolean; me: string; list: Suggestion[]; visible: Suggestion[];
   view: View; setView: (v: View) => void; poolIds: Set<string>; selected: string | null;
-  onSelect: (id: string | null) => void; onToggle: (id: string, on: boolean) => void; poolError: string;
+  onSelect: (id: string | null) => void; onToggle: (id: string, on: boolean) => void; onBan: (s: Suggestion) => void;
+  poolError: string; teamName: string;
 }) {
-  const { today, stale, running, me, list, visible, view, setView, poolIds, selected, onSelect, onToggle, poolError } = props;
+  const { today, stale, running, me, list, visible, view, setView, poolIds, selected, onSelect, onToggle, onBan, poolError, teamName } = props;
   if (!today) {
     if (running) return <div className="lp-idle"><span className="loading-dots"><i /><i /><i /></span> Searching Google Maps</div>;
     return <p className="lp-idle">No list yet today. Check the team filters, then press Filter. Everyone in your team will see the same list.</p>;
@@ -357,7 +356,7 @@ function Results(props: {
     <div className={`lp-results${stale || running ? " stale" : ""}`}>
       <div className="lp-runhead">
         <b>Today's list</b>
-        <span className="muted small">Found by {by} at {clock(today.run_at)}{today.origin.label ? `, around ${today.origin.label}` : today.run_by === me ? "" : ", from their location"}. Tick places to make them contenders.</span>
+        <span className="muted small">Found by {by} at {clock(today.run_at)}{today.origin.label ? `, around ${today.origin.label}` : today.run_by === me ? "" : ", from their location"}. Tick places to make them contenders. Filter again keeps the contenders and finds new places for the rest.</span>
       </div>
       {stale && <div className="lp-stalenote">The team filters changed since this list was made. Press Filter to apply them.</div>}
       {list.length > 0 && (
@@ -377,16 +376,18 @@ function Results(props: {
         <p className="lp-idle">No place passed every filter. Try a larger radius, a wider budget or a lower minimum rating.</p>
       ) : (
         <ol className="pc-list">
-          {visible.map((s) => <PlaceCard key={s.id} s={s} on={s.id === selected} inPool={poolIds.has(s.id)} onSelect={onSelect} onToggle={onToggle} />)}
+          {visible.map((s) => <PlaceCard key={s.id} s={s} on={s.id === selected} inPool={poolIds.has(s.id)} onSelect={onSelect} onToggle={onToggle} onBan={onBan} teamName={teamName} />)}
         </ol>
       )}
     </div>
   );
 }
 
-function PlaceCard({ s, on, inPool, onSelect, onToggle }: {
+function PlaceCard({ s, on, inPool, onSelect, onToggle, onBan, teamName }: {
   s: Suggestion; on: boolean; inPool: boolean; onSelect: (id: string | null) => void; onToggle: (id: string, on: boolean) => void;
+  onBan: (s: Suggestion) => void; teamName: string;
 }) {
+  const [asking, setAsking] = useState(false);
   return (
     <li id={`lp-${s.id}`} className={`pc${on ? " on" : ""}${inPool ? " pooled" : ""}`}>
       <div className="pc-top">
@@ -405,6 +406,20 @@ function PlaceCard({ s, on, inPool, onSelect, onToggle }: {
         </label>
       </div>
       <PhotoStrip photos={s.photos} label={s.name} />
+      {asking ? (
+        <div className="ban-ask" role="group" aria-label={`Never suggest ${s.name} again`}>
+          <p>Never suggest <b>{s.name}</b> to {teamName} again? Anyone in the team can allow it again from History.</p>
+          <div className="row">
+            <button className="btn danger small" onClick={() => { setAsking(false); onBan(s); }}><Ban size={14} aria-hidden="true" />Never again</button>
+            <button className="btn quiet small" onClick={() => setAsking(false)}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <div className="pc-foot">
+          {s.tag ? <span className={`tag ${s.tag.kind}`}>{s.tag.text}</span> : <span />}
+          <button className="ban-btn" onClick={() => setAsking(true)}><Ban size={13} aria-hidden="true" />Never again</button>
+        </div>
+      )}
       {on && (
         <div className="pc-more">
           {s.address && <span className="small muted">{s.address}</span>}

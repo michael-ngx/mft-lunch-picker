@@ -1,7 +1,8 @@
 // Who sees what: signed out → sign in; signed in without a team → join a team
-// (and wait for approval); in a team → the picker. The admin also has /admin.
+// (and wait for approval); in a team → the picker, the games and the team's
+// history. The admin also has /admin.
 import { Navigate, NavLink, Route, Routes } from "react-router-dom";
-import { CircleUserRound, ShieldCheck, UtensilsCrossed } from "lucide-react";
+import { CircleUserRound, History, ShieldCheck, UtensilsCrossed } from "lucide-react";
 import { useApp } from "./lib/store.ts";
 import { AuthPage } from "./pages/AuthPage.tsx";
 import { JoinPage } from "./pages/JoinPage.tsx";
@@ -10,6 +11,7 @@ import { AdminPage } from "./pages/AdminPage.tsx";
 import { AccountPage } from "./pages/AccountPage.tsx";
 import { ChoosePage } from "./pages/ChoosePage.tsx";
 import { WheelPage } from "./pages/WheelPage.tsx";
+import { HistoryPage } from "./pages/HistoryPage.tsx";
 
 export function App() {
   const status = useApp((s) => s.status);
@@ -26,6 +28,7 @@ export function App() {
         <Route path="/account" element={<AccountPage />} />
         <Route path="/choose" element={team ? <ChoosePage /> : <Navigate to="/" replace />} />
         <Route path="/choose/wheel" element={team ? <WheelPage /> : <Navigate to="/" replace />} />
+        <Route path="/history" element={team ? <HistoryPage /> : <Navigate to="/" replace />} />
         <Route path="*" element={team ? <PickerPage /> : <JoinPage />} />
       </Routes>
     </div>
@@ -50,6 +53,11 @@ function TopBar() {
       <NavLink to="/" className="topbar-home" aria-label="MFT Lunch Picker, today's list"><Brand /></NavLink>
       {team && <span className="team-chip">{team.name}</span>}
       <nav className="topbar-nav">
+        {team && (
+          <NavLink to="/history" className="topbar-link" aria-label="History">
+            <History size={18} aria-hidden="true" /><span className="hide-narrow">History</span>
+          </NavLink>
+        )}
         {profile.role === "admin" && (
           <NavLink to="/admin" className="topbar-link">
             <ShieldCheck size={18} aria-hidden="true" /><span className="hide-narrow">Admin</span>

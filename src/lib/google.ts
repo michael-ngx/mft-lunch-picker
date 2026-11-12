@@ -1,7 +1,7 @@
 // Google Maps for the lunch picker: loading the Maps JavaScript API with the key
 // from Settings, and searching nearby places with the Places API (New).
 
-import { isOpenAt, type Candidate, type HoursPeriod, type LatLng, type LunchFilters, type PlacePhoto } from "./lunch.ts";
+import { isOpenAt, pickCuisine, randomSpot, type Candidate, type HoursPeriod, type LatLng, type LunchFilters, type PlacePhoto } from "./lunch.ts";
 
 declare global {
   interface Window {
@@ -112,23 +112,30 @@ function boundsAround(c: LatLng, radiusM: number): google.maps.LatLngBoundsLiter
   return { north: c.lat + dLat, south: c.lat - dLat, east: c.lng + dLng, west: c.lng - dLng };
 }
 
-/** Three searches around the location, merged: the most popular places, the
- *  closest places, and Google's best matches for "lunch" at the minimum rating.
- *  Each returns at most 20 places. The fixed filters are applied afterwards. */
-export interface SearchResult { candidates: Candidate[]; places: Map<string, google.maps.places.Place> }
+/** Four searches around the location, merged. Each returns at most 20 places,
+ *  and the fixed filters are applied afterwards.
+ *  1. The most popular places in the whole radius.
+ *  2. The closest places to a random spot inside the radius, so each Filter
+ *     reaches a different part of the area.
+ *  3. Google's best matches for "lunch" at the minimum rating.
+ *  4. One cuisine, different each time (ramen, tacos, pho, ...). */
+export interface SearchResult { candidates: Candidate[]; places: Map<string, google.maps.places.Place>; cuisine: string }
 
-export async function searchLunch(origin: LatLng, f: LunchFilters): Promise<SearchResult> {
+export async function searchLunch(origin: LatLng, f: LunchFilters, rand: () => number = Math.random): Promise<SearchResult> {
   const { Place } = (await google.maps.importLibrary("places")) as google.maps.PlacesLibrary;
-  const circle = { center: origin, radius: f.radiusM };
+  const spot = randomSpot(origin, f.radiusM, rand);
+  const cuisine = pickCuisine(rand);
+  const text = (textQuery: string) => Place.searchByText({
+    fields: FIELDS, textQuery, locationRestriction: boundsAround(origin, f.radiusM), maxResultCount: 20,
+    // Google rounds the minimum up to the next 0.5, so ask for the 0.5 below and filter exactly here.
+    ...(f.minRating > 0 ? { minRating: Math.floor(f.minRating * 2) / 2 } : {}),
+    ...(f.openNow ? { isOpenNow: true } : {}),
+  });
   const searches: Promise<{ places: google.maps.places.Place[] }>[] = [
-    Place.searchNearby({ fields: FIELDS, locationRestriction: circle, includedTypes: TYPES, maxResultCount: 20, rankPreference: "POPULARITY" }),
-    Place.searchNearby({ fields: FIELDS, locationRestriction: circle, includedTypes: TYPES, maxResultCount: 20, rankPreference: "DISTANCE" }),
-    Place.searchByText({
-      fields: FIELDS, textQuery: "lunch", locationRestriction: boundsAround(origin, f.radiusM), maxResultCount: 20,
-      // Google rounds the minimum up to the next 0.5, so ask for the 0.5 below and filter exactly here.
-      ...(f.minRating > 0 ? { minRating: Math.floor(f.minRating * 2) / 2 } : {}),
-      ...(f.openNow ? { isOpenNow: true } : {}),
-    }),
+    Place.searchNearby({ fields: FIELDS, locationRestriction: { center: origin, radius: f.radiusM }, includedTypes: TYPES, maxResultCount: 20, rankPreference: "POPULARITY" }),
+    Place.searchNearby({ fields: FIELDS, locationRestriction: { center: spot, radius: f.radiusM / 2 }, includedTypes: TYPES, maxResultCount: 20, rankPreference: "DISTANCE" }),
+    text("lunch"),
+    text(`${cuisine} restaurant`),
   ];
   const settled = await Promise.allSettled(searches);
   const ok = settled.filter((r): r is PromiseFulfilledResult<{ places: google.maps.places.Place[] }> => r.status === "fulfilled");
@@ -140,12 +147,14 @@ export async function searchLunch(origin: LatLng, f: LunchFilters): Promise<Sear
   const places = new Map<string, google.maps.places.Place>();
   for (const r of ok) for (const p of r.value.places) if (!places.has(p.id)) places.set(p.id, p);
   const candidates = [...places.values()].map((p) => toCandidate(p, now)).filter((c): c is Candidate => !!c);
-  return { candidates, places };
+  return { candidates, places, cuisine };
 }
 
-/** Adds photos to the places that made the list (only those, to keep Google costs down). */
+/** Adds photos to the places that made the list (only those, to keep Google costs
+ *  down). Places that already have photos, such as kept contenders, keep them. */
 export async function withPhotos<T extends Candidate>(list: T[], places: SearchResult["places"]): Promise<T[]> {
   return Promise.all(list.map(async (s) => {
+    if (s.photos?.length) return s;
     const place = places.get(s.id);
     const photos = place ? await photosOf(place).catch(() => [] as PlacePhoto[]) : [];
     return { ...s, photos };

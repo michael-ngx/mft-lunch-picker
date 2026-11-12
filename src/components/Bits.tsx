@@ -4,18 +4,22 @@ import { ArrowLeft, Star } from "lucide-react";
 import confetti from "canvas-confetti";
 import { PRICE_LEVEL_LABEL, fmtDistance, fmtPrice, type Suggestion } from "../lib/lunch.ts";
 
+type Priced = Pick<Suggestion, "price" | "priceLevel">;
+type Rated = Priced & Pick<Suggestion, "rating" | "ratingCount">;
+type Walked = Pick<Suggestion, "type" | "walkMin" | "distanceM">;
+
 export function BackLink({ to, children }: { to: string; children: string }) {
   return <Link to={to} className="backlink"><ArrowLeft size={17} aria-hidden="true" />{children}</Link>;
 }
 
-export function priceText(s: Suggestion): string {
+export function priceText(s: Priced): string {
   if (s.price) return fmtPrice(s.price);
   if (s.priceLevel && PRICE_LEVEL_LABEL[s.priceLevel]) return PRICE_LEVEL_LABEL[s.priceLevel];
   return "";
 }
 
 /** Rating, review count and price on one line. */
-export function RatingLine({ s }: { s: Suggestion }) {
+export function RatingLine({ s }: { s: Rated }) {
   const price = priceText(s);
   return (
     <span className="rl">
@@ -26,7 +30,7 @@ export function RatingLine({ s }: { s: Suggestion }) {
   );
 }
 
-export function WalkLine({ s }: { s: Suggestion }) {
+export function WalkLine({ s }: { s: Walked }) {
   // Non-breaking spaces keep "10 min walk" and "800 m" from splitting across lines.
   return <span className="muted">{[s.type, `${s.walkMin}\u00a0min\u00a0walk`, fmtDistance(s.distanceM).replace(" ", "\u00a0")].filter(Boolean).join(" · ")}</span>;
 }
