@@ -6,8 +6,8 @@ import { create } from "zustand";
 import type { RealtimeChannel, Session } from "@supabase/supabase-js";
 import { must, supabase } from "./supabase.ts";
 import { TEAM_TZ } from "./config.ts";
-import type { AppConfig, Ban, Membership, Profile, Team, TeamDay, TeamRun } from "./types.ts";
-import { toRef, type LatLng, type LunchFilters, type PlaceRef, type PlaceStat, type RunSummary, type Suggestion } from "./lunch.ts";
+import type { AddedPlace, AppConfig, Ban, Membership, Profile, Team, TeamDay, TeamPeriod, TeamRun } from "./types.ts";
+import { toRef, type Candidate, type LatLng, type LunchFilters, type PlaceRef, type PlaceStat, type RunSummary, type Suggestion } from "./lunch.ts";
 
 export interface Member extends Profile { status: Membership["status"] }
 
@@ -27,6 +27,9 @@ interface State {
   teamDay: TeamDay | null;
   /** The team's never-again list. */
   bans: Ban[];
+  /** Places added by hand and places marked Not today, until 9 AM. */
+  teamPeriod: TeamPeriod | null;
+  periodKey: string;
   /** Goes up whenever any of the team's days changes, so the History page reloads. */
   dayRev: number;
   /** Admin only: requests waiting for approval. */
@@ -34,13 +37,16 @@ interface State {
 }
 
 export const useApp = create<State>(() => ({
-  status: "loading", session: null, profile: null, membership: null, teams: [], team: null, members: [], config: null, today: null, todayKey: "", teamDay: null, bans: [], dayRev: 0, pending: 0,
+  status: "loading", session: null, profile: null, membership: null, teams: [], team: null, members: [], config: null, today: null, todayKey: "", teamDay: null, bans: [], teamPeriod: null, periodKey: "", dayRev: 0, pending: 0,
 }));
 const set = useApp.setState;
 const get = useApp.getState;
 
 /** Today's date in Montréal, YYYY-MM-DD. */
 export const dayKey = (d = new Date()) => new Intl.DateTimeFormat("en-CA", { timeZone: TEAM_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+
+/** The lunch period: from 9 AM Montréal time to 9 AM the next day, named by its first day. */
+export const periodKey = (d = new Date()) => dayKey(new Date(d.getTime() - 9 * 3_600_000));
 
 export const isAdmin = () => get().profile?.role === "admin";
 
@@ -59,6 +65,13 @@ async function loadPending() {
 export function checkDay() {
   const t = get().team;
   if (t && get().todayKey && get().todayKey !== dayKey()) { void loadToday(t.id); void loadTeamDay(t.id); }
+  if (t && get().periodKey && get().periodKey !== periodKey()) void loadPeriod(t.id);
+}
+
+async function loadPeriod(teamId: string) {
+  const key = periodKey();
+  const row = must(await supabase.from("team_periods").select("*").eq("team_id", teamId).eq("period", key).maybeSingle());
+  set({ teamPeriod: (row as TeamPeriod | null) ?? null, periodKey: key });
 }
 
 async function loadTeamDay(teamId: string) {
@@ -101,8 +114,8 @@ export async function loadAll() {
     const cfg = must(await supabase.from("app_config").select("google_maps_key, map_id, updated_at").maybeSingle());
     set({ config: cfg as AppConfig | null });
   } else set({ config: null });
-  if (team) await Promise.all([loadToday(team.id), loadMembers(team.id), loadTeamDay(team.id), loadBans(team.id)]);
-  else set({ today: null, members: [], teamDay: null, bans: [] });
+  if (team) await Promise.all([loadToday(team.id), loadMembers(team.id), loadTeamDay(team.id), loadBans(team.id), loadPeriod(team.id)]);
+  else set({ today: null, members: [], teamDay: null, bans: [], teamPeriod: null });
   const admin = (profile as Profile | null)?.role === "admin";
   if (admin) await loadPending();
   set({ status: "ready" });
@@ -142,6 +155,7 @@ function listen(uid: string, teamId: string | null, admin: boolean) {
         void loadTeamDay(teamId);
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "team_bans", filter: `team_id=eq.${teamId}` }, () => void loadBans(teamId))
+      .on("postgres_changes", { event: "*", schema: "public", table: "team_periods", filter: `team_id=eq.${teamId}` }, () => void loadPeriod(teamId))
       .subscribe(),
   );
 }
@@ -153,7 +167,7 @@ export function boot() {
     set({ session });
     if (!session) {
       unsubscribe();
-      set({ status: "signedOut", profile: null, membership: null, team: null, members: [], config: null, today: null, teamDay: null, bans: [] });
+      set({ status: "signedOut", profile: null, membership: null, team: null, members: [], config: null, today: null, teamDay: null, bans: [], teamPeriod: null });
     } else if (session.user.id !== prev || event === "SIGNED_IN") {
       // Supabase calls this inside its auth lock; load outside it.
       setTimeout(() => void loadAll().catch(() => set({ status: "ready" })), 0);
@@ -276,6 +290,56 @@ export async function setBan(place: { id: string; name: string; address: string 
   }
 }
 
+const emptyPeriod = (teamId: string): TeamPeriod => ({ team_id: teamId, period: periodKey(), added: [], skipped: [] });
+
+/** Runs a change to this period's places: shows it at once, then takes the team's lists back from the database. */
+async function changePeriod(local: (p: TeamPeriod, d: TeamDay | null) => { p: TeamPeriod; d?: TeamDay | null }, rpc: () => Promise<unknown>) {
+  const t = get().team;
+  if (!t) return;
+  const before = { teamPeriod: get().teamPeriod, teamDay: get().teamDay };
+  const next = local(get().teamPeriod ?? emptyPeriod(t.id), get().teamDay);
+  set({ teamPeriod: next.p, ...(next.d !== undefined ? { teamDay: next.d } : {}) });
+  try {
+    await rpc();
+    await loadPeriod(t.id);
+  } catch (e) {
+    set(before);
+    throw e;
+  }
+}
+
+/** Adds a place to today's list for the team; it stays through every Filter until 9 AM. */
+export function addPlace(c: Candidate) {
+  const me = get().profile;
+  const entry: AddedPlace = { ...c, addedBy: me?.id ?? null, addedByName: me?.display_name ?? "", addedAt: new Date().toISOString() };
+  return changePeriod(
+    (p) => ({ p: { ...p, added: p.added.some((a) => a.id === c.id) ? p.added : [...p.added, entry], skipped: p.skipped.filter((x) => x.id !== c.id) } }),
+    async () => must(await supabase.rpc("add_place", { p_place: c })),
+  );
+}
+
+/** Takes a place off the added places, or all of them with null. */
+export function removeAdded(id: string | null) {
+  return changePeriod(
+    (p) => ({ p: { ...p, added: id === null ? [] : p.added.filter((a) => a.id !== id) } }),
+    async () => must(await supabase.rpc("remove_added", { p_place: id })),
+  );
+}
+
+/** Marks a place Not today until 9 AM (or brings it back). It also stops being an added place or a contender. */
+export function skipToday(place: { id: string; name: string }, on: boolean) {
+  const me = get().profile;
+  return changePeriod(
+    (p, d) => on
+      ? {
+        p: { ...p, added: p.added.filter((a) => a.id !== place.id), skipped: p.skipped.some((x) => x.id === place.id) ? p.skipped : [...p.skipped, { id: place.id, name: place.name, by: me?.id ?? null, byName: me?.display_name ?? "", at: new Date().toISOString() }] },
+        d: d ? { ...d, contenders: d.contenders.filter((x) => x !== place.id) } : d,
+      }
+      : { p: { ...p, skipped: p.skipped.filter((x) => x.id !== place.id) } },
+    async () => must(await supabase.rpc("skip_today", { p_place: place.id, p_name: place.name, p_on: on })),
+  );
+}
+
 /** The team's played days, newest first. */
 export async function loadHistory(): Promise<TeamDay[]> {
   const t = get().team;
@@ -284,13 +348,13 @@ export async function loadHistory(): Promise<TeamDay[]> {
   return (rows ?? []) as TeamDay[];
 }
 
-interface StatRow { place_id: string; shown_today: number; shown_days: number; last_shown: string | null; played_days: number; last_played: string | null; went_days: number; last_went: string | null }
+interface StatRow { place_id: string; shown_today: number; shown_days: number; last_shown: string | null; passed_days: number; played_days: number; last_played: string | null; went_days: number; last_went: string | null }
 
 /** Each place's history with the team, for the suggestions. */
 export async function fetchPlaceStats(): Promise<Map<string, PlaceStat>> {
   const rows = (must(await supabase.rpc("place_stats")) ?? []) as StatRow[];
   return new Map(rows.map((r) => [r.place_id, {
-    shownToday: r.shown_today, shownDays: r.shown_days, lastShown: r.last_shown,
+    shownToday: r.shown_today, shownDays: r.shown_days, lastShown: r.last_shown, passedDays: r.passed_days ?? 0,
     playedDays: r.played_days, lastPlayed: r.last_played, wentDays: r.went_days, lastWent: r.last_went,
   }]));
 }

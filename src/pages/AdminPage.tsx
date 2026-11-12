@@ -9,9 +9,6 @@ import { BackLink } from "../components/Bits.tsx";
 
 interface Row extends Membership { profile: Profile | undefined }
 
-// Only the live addresses: anyone developing on their own computer uses their own key (see README).
-const SITES = ["https://mft-lunch.michael-ngx.com/*", "https://mft-lunch-picker.vercel.app/*"];
-
 function when(iso: string) {
   return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
@@ -124,7 +121,7 @@ function GoogleSettings() {
   return (
     <section className="card">
       <h2>Google Maps</h2>
-      <p className="muted">Every search uses this key: the map and the place search run in the browser of whoever presses Run. Only signed-in, approved people can read it, and its website restrictions keep it from working anywhere else.</p>
+      <p className="muted">Every search uses this key: the map and the place search run in the browser of whoever uses them. Only signed-in, approved people can read it, and its website restrictions keep it from working anywhere else.</p>
       <div className="field"><label htmlFor="gk">Google Maps API key</label>
         <input id="gk" className="input" value={key} onChange={(e) => { setKey(e.target.value.trim()); setMsg(""); }} placeholder="AIza…" autoComplete="off" spellCheck={false} /></div>
       <div className="field"><label htmlFor="mid">Map ID (optional)</label>
@@ -135,20 +132,6 @@ function GoogleSettings() {
         {msg && <span className="small">{msg}</span>}
       </div>
 
-      <details className="steps">
-        <summary>Get a key (once, about 10 minutes)</summary>
-        <ol>
-          <li>Open <a href="https://console.cloud.google.com/google/maps-apis/start" target="_blank" rel="noreferrer">Google Maps Platform</a>, create a project (for example <b>mft-lunch-picker</b>) and add a billing account. Google requires one even within the free usage.</li>
-          <li>In APIs and services, Library, enable <b>Maps JavaScript API</b> and <b>Places API (New)</b>.</li>
-          <li>In APIs and services, Credentials, click Create credentials, API key.</li>
-          <li>Edit the key. Under Application restrictions choose <b>Websites</b> and add:
-            <ul>{SITES.map((s) => <li key={s}><code>{s}</code></li>)}</ul></li>
-          <li>Under API restrictions choose <b>Restrict key</b>, tick only Maps JavaScript API and Places API (New), and save.</li>
-          <li>Paste the key above and click Save.</li>
-        </ol>
-        <p className="muted small">Don't add localhost: every computer is localhost, so anyone with the key could use it from their own machine. People developing locally put their own key in <code>.env.local</code> instead.</p>
-        <p className="muted small">Cost: each Filter makes three searches (two Nearby Search, one Text Search). Google gives about 1,000 free calls a month for each, so about 500 runs a month are free. To rule out a surprise bill, set a daily cap: Places API (New), Quotas, requests per day, for example 60.</p>
-      </details>
     </section>
   );
 }

@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_FILTERS, budgetPhrase, distanceM, dropReason, fmtBudget, fmtDistance, fmtPrice, isOpenAt, normalizeFilters, pickLunch, priceFits,
-  randomSpot, teamScore,
+  randomPlace, randomSpot, teamScore,
   type Candidate, type LatLng, type LunchFilters, type PickOptions, type PlaceStat,
 } from "../src/lib/lunch.ts";
 
@@ -33,7 +33,7 @@ function seeded(seed: number): () => number {
 const FLAT: PickOptions = { rand: () => 0.5, today: "2026-11-11" };
 const TODAY = "2026-11-11";
 const stat = (over: Partial<PlaceStat> = {}): PlaceStat => ({
-  shownToday: 0, shownDays: 0, lastShown: null, playedDays: 0, lastPlayed: null, wentDays: 0, lastWent: null, ...over,
+  shownToday: 0, shownDays: 0, lastShown: null, passedDays: 0, playedDays: 0, lastPlayed: null, wentDays: 0, lastWent: null, ...over,
 });
 
 const F: LunchFilters = { ...DEFAULT_FILTERS, bands: ["10-20", "20-30"], radiusM: 1000, minRating: 4.2, count: 5, openNow: true, allowNoPrice: false };
@@ -202,8 +202,46 @@ describe("suggestions vary", () => {
   it("fades out places shown on many days but never chosen", () => {
     const a = place("skipped", { rating: 4.6, type: "A" });
     const b = place("unseen", { rating: 4.5, type: "B" });
-    const stats = new Map([["skipped", stat({ shownDays: 5, lastShown: "2026-11-10" })]]);
+    const stats = new Map([["skipped", stat({ shownDays: 5, passedDays: 5, lastShown: "2026-11-10" })]]);
     expect(pickLunch([a, b], { ...F, count: 1 }, HOME, { ...FLAT, stats }).suggestions[0].id).toBe("unseen");
+  });
+
+  it("takes a little off for each day a place was shown but not a contender, even a favourite", () => {
+    const base = stat({ playedDays: 2, lastPlayed: "2026-10-20", lastShown: "2026-11-10", shownDays: 4 });
+    const chosen = teamScore({ ...base, passedDays: 0 }, TODAY).delta;
+    const passed2 = teamScore({ ...base, passedDays: 2 }, TODAY).delta;
+    const passed9 = teamScore({ ...base, passedDays: 9 }, TODAY).delta;
+    expect(chosen - passed2).toBeCloseTo(0.12);
+    expect(chosen - passed9).toBeCloseTo(0.3); // capped
+  });
+
+  it("leaves out places marked Not today and places added by hand", () => {
+    const { suggestions, summary } = pickLunch(twelve(), F, HOME, { ...FLAT, skipped: new Set(["p11"]), pinned: new Set(["p10"]) });
+    expect(suggestions.map((s) => s.id)).not.toContain("p11");
+    expect(suggestions.map((s) => s.id)).not.toContain("p10");
+    expect(summary.dropped.notToday).toBe(1);
+    // A contender marked Not today is not kept either.
+    const first = pickLunch(twelve(), F, HOME, FLAT).suggestions;
+    const again = pickLunch(twelve(), F, HOME, { ...FLAT, keep: [first[0]], skipped: new Set([first[0].id]) }).suggestions;
+    expect(again.map((s) => s.id)).not.toContain(first[0].id);
+  });
+
+  it("picks a random place that passes the filters, never a banned or Not today one", () => {
+    const cands = [...twelve(), place("far", { pos: north(1500) })];
+    const banned = new Set(["p0", "p1"]);
+    const skipped = new Set(["p2"]);
+    const counts = new Map<string, number>();
+    const rand = seeded(5);
+    for (let i = 0; i < 900; i++) {
+      const p = randomPlace(cands, F, HOME, { banned, skipped, rand })!;
+      counts.set(p.id, (counts.get(p.id) ?? 0) + 1);
+    }
+    expect([...counts.keys()].sort()).toEqual(["p10", "p11", "p3", "p4", "p5", "p6", "p7", "p8", "p9"]);
+    for (const n of counts.values()) expect(n).toBeGreaterThan(60); // about 100 each: the same chance for all
+    // Recent picks are left out until the rest have had a turn.
+    const avoid = new Set(["p3", "p4", "p5", "p6", "p7", "p8", "p9", "p10"]);
+    expect(randomPlace(cands, F, HOME, { banned, skipped, avoid, rand })!.id).toBe("p11");
+    expect(randomPlace([], F, HOME)).toBeNull();
   });
 
   it("mixes kinds of food instead of filling the list with one", () => {

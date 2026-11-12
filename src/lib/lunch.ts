@@ -142,7 +142,7 @@ export function priceFits(price: PriceRange, bands: BandId[]): boolean {
   });
 }
 
-export type DropReason = "closedForGood" | "far" | "rating" | "budget" | "noPrice" | "closedNow" | "banned";
+export type DropReason = "closedForGood" | "far" | "rating" | "budget" | "noPrice" | "closedNow" | "banned" | "notToday";
 
 export const DROP_LABEL: Record<DropReason, string> = {
   closedForGood: "closed by Google",
@@ -152,6 +152,7 @@ export const DROP_LABEL: Record<DropReason, string> = {
   noPrice: "no price range",
   closedNow: "closed now",
   banned: "on the never-again list",
+  notToday: "marked Not today",
 };
 
 /** The first fixed filter a place fails, or null when it passes every one. */
@@ -205,6 +206,8 @@ export interface PlaceStat {
   /** Earlier days in the last 3 weeks whose lists showed it. */
   shownDays: number;
   lastShown: string | null;
+  /** Of those days, the ones it was not a contender in a game. */
+  passedDays: number;
   /** Days it was a contender in a game that was played. */
   playedDays: number;
   lastPlayed: string | null;
@@ -230,9 +233,9 @@ export const TUNING = {
   /** Per day it was a contender or the team went there, up to 4 such days. */
   likedStep: 0.06,
   likedMaxDays: 4,
-  /** Per earlier day it was shown without ever being a contender. */
-  skippedStep: 0.07,
-  skippedMax: 0.35,
+  /** Per earlier day in the last 3 weeks it was shown but not a contender in that day's game. */
+  passedStep: 0.06,
+  passedMax: 0.3,
   /** Per list today that already showed it, so Filter again brings new places. */
   shownTodayStep: 0.3,
   shownTodayMax: 0.6,
@@ -261,8 +264,8 @@ export function teamScore(stat: PlaceStat | undefined, today: string): { delta: 
   let delta = 0;
   let tag: PlaceTag | undefined;
   const liked = stat.playedDays + stat.wentDays;
-  if (liked > 0) delta += TUNING.likedStep * Math.min(liked, TUNING.likedMaxDays);
-  else delta -= Math.min(TUNING.skippedStep * stat.shownDays, TUNING.skippedMax);
+  delta += TUNING.likedStep * Math.min(liked, TUNING.likedMaxDays);
+  delta -= Math.min(TUNING.passedStep * stat.passedDays, TUNING.passedMax);
   delta -= Math.min(TUNING.shownTodayStep * stat.shownToday, TUNING.shownTodayMax);
   if (stat.lastWent) {
     const ago = Math.max(0, daysBetween(stat.lastWent, today));
@@ -280,6 +283,10 @@ export interface PickOptions {
   stats?: Map<string, PlaceStat>;
   /** Places on the team's never-again list. */
   banned?: Set<string>;
+  /** Places marked Not today. */
+  skipped?: Set<string>;
+  /** Places added by hand: already on the list, so not drawn. */
+  pinned?: Set<string>;
   /** Today's contenders from the list before; kept at the top of the new list. */
   keep?: Suggestion[];
   /** Today, YYYY-MM-DD, to count days since the team went somewhere. */
@@ -299,8 +306,8 @@ function gumbel(rand: () => number): number {
 /** Applies the fixed filters strictly, then draws the list:
  *  1. Every place that passes gets a score: its rating (adjusted for review count),
  *     less a little for distance, plus or minus its history with the team (new for
- *     the team, recently visited, often a contender, often shown and skipped,
- *     already shown today).
+ *     the team, recently visited, often a contender, shown before but not
+ *     chosen as a contender, already shown today).
  *  2. Places are drawn one at a time at random, better scores being more likely;
  *     each place of the same kind already drawn makes the next one less likely.
  *  3. With 4 or more places, one is new for the team when there is one.
@@ -308,6 +315,8 @@ function gumbel(rand: () => number): number {
 export function pickLunch(cands: Candidate[], f: LunchFilters, origin: LatLng, opts: PickOptions = {}): { suggestions: Suggestion[]; summary: RunSummary } {
   const rand = opts.rand ?? Math.random;
   const banned = opts.banned ?? new Set<string>();
+  const skipped = opts.skipped ?? new Set<string>();
+  const pinned = opts.pinned ?? new Set<string>();
   const today = opts.today ?? new Date().toISOString().slice(0, 10);
   const seen = new Set<string>();
   const unique = cands.filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true)));
@@ -323,7 +332,7 @@ export function pickLunch(cands: Candidate[], f: LunchFilters, origin: LatLng, o
   // Today's contenders that still pass, with Google's latest details when found again.
   const kept: Suggestion[] = [];
   for (const k of opts.keep ?? []) {
-    if (banned.has(k.id) || kept.some((x) => x.id === k.id)) continue;
+    if (banned.has(k.id) || skipped.has(k.id) || pinned.has(k.id) || kept.some((x) => x.id === k.id)) continue;
     const now = fresh.get(k.id);
     const c: Candidate = now ? { ...now, photos: now.photos?.length ? now.photos : k.photos } : k;
     if (dropReason(c, f, origin)) continue;
@@ -335,8 +344,8 @@ export function pickLunch(cands: Candidate[], f: LunchFilters, origin: LatLng, o
   const dropped: RunSummary["dropped"] = {};
   const pool: (Suggestion & { key: number; isNew: boolean })[] = [];
   for (const c of unique) {
-    if (keptIds.has(c.id)) continue;
-    const why = banned.has(c.id) ? "banned" : dropReason(c, f, origin);
+    if (keptIds.has(c.id) || pinned.has(c.id)) continue;
+    const why = banned.has(c.id) ? "banned" : skipped.has(c.id) ? "notToday" : dropReason(c, f, origin);
     if (why) { dropped[why] = (dropped[why] ?? 0) + 1; continue; }
     const { d, adj, base } = measure(c);
     const team = teamScore(opts.stats?.get(c.id), today);
@@ -372,6 +381,30 @@ export function pickLunch(cands: Candidate[], f: LunchFilters, origin: LatLng, o
 
   const suggestions = [...kept, ...drawn.map(({ key: _k, isNew: _n, ...s }) => s)].map((s, i) => ({ ...s, rank: i + 1 }));
   return { suggestions, summary: { found: unique.length, matched: pool.length + kept.length, dropped, kept: kept.length } };
+}
+
+/** A place added by hand, measured from the search spot like the rest of the list. */
+export function asSuggestion(c: Candidate, origin: LatLng | null, rank = 0): Suggestion {
+  const d = origin ? distanceM(origin, c.pos) : 0;
+  const v = c.rating === null ? 0 : c.ratingCount;
+  const adj = (v * (c.rating ?? 0) + TUNING.priorWeight * TUNING.priorRating) / (v + TUNING.priorWeight);
+  return { ...c, rank, distanceM: d, walkMin: walkMinutes(d), adjRating: adj, score: adj };
+}
+
+/** Random pick: any place that passes the team filters and is not on the
+ *  never-again list or marked Not today, each with the same chance. Places in
+ *  `avoid` (picked a moment ago) are left out until every other place has had a turn. */
+export function randomPlace(cands: Candidate[], f: LunchFilters, origin: LatLng, opts: {
+  banned?: Set<string>; skipped?: Set<string>; avoid?: Set<string>; extra?: Candidate[]; rand?: () => number;
+} = {}): Candidate | null {
+  const rand = opts.rand ?? Math.random;
+  const seen = new Set<string>();
+  const ok = [...cands.filter((c) => !dropReason(c, f, origin)), ...(opts.extra ?? [])].filter((c) =>
+    !seen.has(c.id) && (seen.add(c.id), true) && !opts.banned?.has(c.id) && !opts.skipped?.has(c.id));
+  if (!ok.length) return null;
+  const fresh = ok.filter((c) => !opts.avoid?.has(c.id));
+  const from = fresh.length ? fresh : ok;
+  return from[Math.min(from.length - 1, Math.floor(rand() * from.length))];
 }
 
 /** A random spot at most half the radius from the center: the second search looks

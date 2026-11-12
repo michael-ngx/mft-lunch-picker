@@ -1,27 +1,32 @@
-// The picker: a full-screen map with the team's list floating on the left (a
-// bottom sheet on phones). Filter draws a list of places that pass the team
-// filters and saves it for the whole team; ticking places makes them Contenders;
-// the red Let's choose button takes the Contenders to a game. Never again takes a
-// place off every future list.
-import { useEffect, useMemo, useRef, useState } from "react";
+// The picker: the team's list is the main part of the page, with the map beside
+// it (above it on phones). Filter draws places that pass the team filters and
+// saves them for the whole team. Places can also be added by hand (they stay
+// until 9 AM), marked Not today (hidden until 9 AM) or Never again. Ticking places
+// makes them Contenders; the red Let's choose button takes them to a game.
+// Random pick shows one place from the area at random, for you only.
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Ban, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Dices, ExternalLink, List, LocateFixed, MapPin, MapPinned, Minus, Plus, RotateCw, Star, X } from "lucide-react";
+import { Ban, CalendarX2, ChevronDown, Dices, ExternalLink, LocateFixed, MapPin, MapPinned, Minus, Plus, RotateCw, Shuffle, Star, Trash2, X } from "lucide-react";
 import {
   COUNT, PRICE_BANDS, RADIUS, budgetPhrase, fmtBudget, fmtDistance, normalizeFilters, pickLunch, walkMinutes,
-  type BandId, type LunchFilters, type Suggestion,
+  type BandId, type LunchFilters,
 } from "../lib/lunch.ts";
-import { checkDay, dayKey, fetchPlaceStats, saveFilters, saveRun, setBan, setContender, useApp, type Member } from "../lib/store.ts";
+import { checkDay, dayKey, fetchPlaceStats, removeAdded, saveFilters, saveRun, setBan, setContender, skipToday, useApp, type Member } from "../lib/store.ts";
 import { choosePlace, freshPosition, locate, switchToDevice, useGeo } from "../lib/geo.ts";
-import { mapsKey, searchLunch, withPhotos } from "../lib/google.ts";
+import { mapsKey, rememberPool, searchLunch, withPhotos } from "../lib/google.ts";
+import { useTeamList, type ListPlace } from "../lib/list.ts";
 import { LunchMap, type MapStatus } from "../components/LunchMap.tsx";
 import { PhotoStrip } from "../components/Photos.tsx";
 import { RatingLine, WalkLine, priceText } from "../components/Bits.tsx";
 import { WhereBar } from "../components/WhereBar.tsx";
-import type { Team, TeamRun } from "../lib/types.ts";
+import { AddPlace } from "../components/AddPlace.tsx";
+import { RandomPick } from "../components/RandomPick.tsx";
+import type { SkippedPlace, Team, TeamRun } from "../lib/types.ts";
 import { DEV_MAPS_KEY } from "../lib/config.ts";
 
 const same = (a: unknown, b: unknown) => JSON.stringify(normalizeFilters(a)) === JSON.stringify(normalizeFilters(b));
 export const clock = (iso: string | number) => new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+const MAP_PAD = { top: 24, right: 24, bottom: 24, left: 24 };
 
 function useNarrow() {
   const q = "(max-width: 760px)";
@@ -58,7 +63,7 @@ function useTeamFilters(team: Team): [LunchFilters, (f: LunchFilters) => void] {
 type View = { pool: boolean; near: boolean; top: boolean; open: boolean; prices: string[] };
 const NO_VIEW: View = { pool: false, near: false, top: false, open: false, prices: [] };
 
-function applyView(list: Suggestion[], v: View, pool: Set<string>) {
+function applyView(list: ListPlace[], v: View, pool: Set<string>) {
   return list.filter((s) =>
     (!v.pool || pool.has(s.id)) &&
     (!v.near || s.walkMin <= 5) &&
@@ -67,29 +72,33 @@ function applyView(list: Suggestion[], v: View, pool: Set<string>) {
     (!v.prices.length || v.prices.includes(priceText(s))));
 }
 
+type Toast = { text: ReactNode; undo?: () => void };
+
 export function PickerPage() {
   const team = useApp((s) => s.team)!;
   const today = useApp((s) => s.today);
   const teamDay = useApp((s) => s.teamDay);
-  const bans = useApp((s) => s.bans);
+  const period = useApp((s) => s.teamPeriod);
   const config = useApp((s) => s.config);
   const members = useApp((s) => s.members);
   const profile = useApp((s) => s.profile)!;
   const geo = useGeo();
   const narrow = useNarrow();
   const navigate = useNavigate();
+  const { all, added, run: runList, banned, skipped, addedIds } = useTeamList();
   const [filters, setFilters] = useTeamFilters(team);
   const [filtersOpen, setFiltersOpen] = useState(!today);
-  const [listOpen, setListOpen] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState("");
-  const [undo, setUndo] = useState<{ id: string; name: string; address: string } | null>(null);
   const [view, setView] = useState<View>(NO_VIEW);
-  const [poolError, setPoolError] = useState("");
+  const [listError, setListError] = useState("");
   const [hint, setHint] = useState(false);
   const [picking, setPicking] = useState(false);
+  const [random, setRandom] = useState(false);
+  const [toast, setToast] = useState<Toast | null>(null);
   const [mapStatus, setMapStatus] = useState<{ s: MapStatus; error?: string }>({ s: "loading" });
+  const mapRef = useRef<HTMLElement>(null);
 
   const apiKey = DEV_MAPS_KEY || config?.google_maps_key || "";
   const keyChanged = !!mapsKey() && !!apiKey && mapsKey() !== apiKey;
@@ -104,15 +113,12 @@ export function PickerPage() {
     if (selected) document.getElementById(`lp-${selected}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [selected]);
   useEffect(() => { if (!hint) return; const t = setTimeout(() => setHint(false), 3500); return () => clearTimeout(t); }, [hint]);
-  useEffect(() => { if (!undo) return; const t = setTimeout(() => setUndo(null), 8000); return () => clearTimeout(t); }, [undo]);
+  useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 8000); return () => clearTimeout(t); }, [toast]);
 
   const stale = !!today && !same(today.filters, filters);
   const poolIds = useMemo(() => new Set(teamDay?.contenders ?? []), [teamDay?.contenders]);
-  const bannedIds = useMemo(() => new Set(bans.map((b) => b.place_id)), [bans]);
-  // Places put on the never-again list disappear from today's list for everyone.
-  const list = useMemo(() => (today?.suggestions ?? []).filter((s) => !bannedIds.has(s.id)), [today, bannedIds]);
-  const pool = list.filter((s) => poolIds.has(s.id));
-  const visible = applyView(list, view, poolIds);
+  const pool = all.filter((s) => poolIds.has(s.id));
+  const visible = useMemo(() => applyView(all, view, poolIds), [all, view, poolIds]);
   // Taps on the map set the location only in pick mode, or while no location is known.
   const tapToSet = picking || (geo.status === "error" && !geo.pos);
   // Editing (or no list yet): the circle is around you with the radius being edited.
@@ -120,9 +126,7 @@ export function PickerPage() {
   const showRun = !!today && !filtersOpen;
   const center = showRun ? today!.origin : geo.pos;
   const radiusM = showRun ? today!.filters.radiusM : filters.radiusM;
-  const padding = useMemo(() => narrow
-    ? { top: 24, right: 24, left: 24, bottom: listOpen ? Math.round(innerHeight * 0.55) : 90 }
-    : { top: 28, right: 80, bottom: 28, left: listOpen ? 460 : 28 }, [narrow, listOpen]);
+  const fail = (e: unknown) => setListError(e instanceof Error ? e.message : String(e));
 
   const run = async () => {
     setRunError(""); setRunning(true);
@@ -130,18 +134,16 @@ export function PickerPage() {
       const origin = await freshPosition();
       if (!origin) throw new Error("Set where you are first: type an address or pick a spot on the map.");
       // The team's history makes the draw; without it the list is still drawn, just without the labels.
-      const [{ candidates, places, cuisine }, stats] = await Promise.all([
-        searchLunch(origin, filters),
-        fetchPlaceStats().catch(() => null),
-      ]);
-      const picked = pickLunch(candidates, filters, origin, {
-        stats: stats ?? undefined, banned: bannedIds, keep: pool, today: dayKey(),
+      const [found, stats] = await Promise.all([searchLunch(origin, filters), fetchPlaceStats().catch(() => null)]);
+      rememberPool(origin, filters, found);
+      const picked = pickLunch(found.candidates, filters, origin, {
+        stats: stats ?? undefined, banned, skipped, pinned: addedIds, keep: runList.filter((s) => poolIds.has(s.id)), today: dayKey(),
       });
       const suggestions = stats ? picked.suggestions : picked.suggestions.map((s) => ({ ...s, tag: undefined }));
       const where = useGeo.getState();
       const label = where.manual ? where.label : "";
-      await saveRun({ origin: { ...origin, label }, filters, suggestions: await withPhotos(suggestions, places), summary: { ...picked.summary, cuisine } });
-      setFiltersOpen(false); setListOpen(true);
+      await saveRun({ origin: { ...origin, label }, filters, suggestions: await withPhotos(suggestions, found.places), summary: { ...picked.summary, cuisine: found.cuisine } });
+      setFiltersOpen(false);
     } catch (e) {
       setRunError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -149,39 +151,84 @@ export function PickerPage() {
     }
   };
 
-  const toggle = (id: string, on: boolean) => {
-    setPoolError("");
-    void setContender(id, on).catch((e) => setPoolError(e instanceof Error ? e.message : String(e)));
-  };
-
+  const toggle = (id: string, on: boolean) => { setListError(""); void setContender(id, on).catch(fail); };
   const choose = () => (pool.length >= 2 ? navigate("/choose") : setHint(true));
+  const drop = (s: ListPlace) => { if (selected === s.id) setSelected(null); };
 
-  const ban = (s: Suggestion) => {
+  const notToday = (s: ListPlace) => {
+    drop(s);
+    const place = { id: s.id, name: s.name };
+    setToast({ text: <><b>{s.name}</b> is hidden until 9 AM.</>, undo: () => void skipToday(place, false).catch(fail) });
+    void skipToday(place, true).catch((e) => { setToast(null); fail(e); });
+  };
+  const ban = (s: ListPlace) => {
+    drop(s);
     const place = { id: s.id, name: s.name, address: s.address };
-    if (selected === s.id) setSelected(null);
-    setUndo(place);
-    void setBan(place, true).catch((e) => { setUndo(null); setPoolError(e instanceof Error ? e.message : String(e)); });
+    setToast({ text: <><b>{s.name}</b> won't be suggested again.</>, undo: () => void setBan(place, false).catch(fail) });
+    void setBan(place, true).catch((e) => { setToast(null); fail(e); });
   };
-  const unban = () => {
-    if (!undo) return;
-    const place = undo;
-    setUndo(null);
-    void setBan(place, false).catch((e) => setPoolError(e instanceof Error ? e.message : String(e)));
-  };
+  const remove = (s: ListPlace) => { drop(s); void removeAdded(s.id).catch(fail); };
+  const pickOnMap = () => { setPicking(true); if (narrow) mapRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }); };
+  const randomOrigin = geo.pos ?? today?.origin ?? null;
 
   return (
     <main className="picker">
-      <section className="map-full">
+      <section className="panel" aria-label="Today's list">
+        <div className="panel-inner">
+          <header className="panel-head">
+            <div className="panel-title">
+              <h1>Lunch for {team.name}</h1>
+              <span className="muted small">{all.length} place{all.length === 1 ? "" : "s"}{pool.length ? ` · ${pool.length} contender${pool.length === 1 ? "" : "s"}` : ""}</span>
+            </div>
+            <button className="btn quiet random-btn" onClick={() => setRandom(true)} disabled={!ready || !randomOrigin}>
+              <Shuffle size={16} aria-hidden="true" />Random pick
+            </button>
+          </header>
+
+          <div className="panel-top">
+            <WhereBar geo={geo} ready={ready} onPickOnMap={pickOnMap} />
+            <section className={`lp-filters${filtersOpen ? " open" : ""}`}>
+              <button className="lp-filters-head" onClick={() => setFiltersOpen(!filtersOpen)} aria-expanded={filtersOpen}>
+                <span className="lp-filters-title">Team filters</span>
+                {!filtersOpen && <span className="lp-filters-sum">{summary(filters)}</span>}
+                <ChevronDown size={18} aria-hidden="true" className="lp-chev" />
+              </button>
+              {filtersOpen && <>
+                <FilterForm f={filters} onChange={setFilters} />
+                <FiltersBy team={team} members={members} me={profile.id} />
+              </>}
+            </section>
+          </div>
+
+          <button className="btn lp-run" onClick={() => void run()} disabled={!ready || running || !geo.pos}>
+            {running ? "Searching" : "Filter"}
+          </button>
+          {ready && !geo.pos && geo.status !== "locating" && <p className="hint lp-center">Set where you are (above) before you filter.</p>}
+          {runError && <div className="alert err">{runError}</div>}
+
+          <AddPlace near={today?.origin ?? geo.pos} disabled={!ready}
+            onAdded={(name) => setToast({ text: <><b>{name}</b> is on today's list until 9 AM.</> })} />
+          {listError && <div className="alert err">{listError}</div>}
+
+          <Results today={today} stale={stale} running={running} me={profile.id} all={all} added={added} visible={visible}
+            view={view} setView={setView} poolIds={poolIds} selected={selected} onSelect={setSelected} onToggle={toggle}
+            onNotToday={notToday} onBan={ban} onRemove={remove} onClearAdded={() => void removeAdded(null).catch(fail)} teamName={team.name} />
+
+          <NotTodayList list={period?.skipped ?? []} me={profile.id} onBack={(x) => void skipToday({ id: x.id, name: x.name }, false).catch(fail)} />
+        </div>
+      </section>
+
+      <section className="map-side" ref={mapRef}>
         {canMap ? (
           <>
-            <LunchMap apiKey={apiKey} mapId={config?.map_id ?? ""} me={geo.pos} center={center} radiusM={radiusM} padding={padding}
-              suggestions={today && !stale ? visible : []} selected={selected} onSelect={(id) => { setSelected(id); setListOpen(true); }}
-              onTap={tapToSet ? (pos) => { choosePlace(pos, "Spot on the map", "map"); if (picking) { setPicking(false); setListOpen(true); } } : undefined}
+            <LunchMap apiKey={apiKey} mapId={config?.map_id ?? ""} me={geo.pos} center={center} radiusM={radiusM} padding={MAP_PAD}
+              suggestions={stale ? visible.filter((s) => addedIds.has(s.id)) : visible} selected={selected} onSelect={setSelected}
+              onTap={tapToSet ? (pos) => { choosePlace(pos, "Spot on the map", "map"); setPicking(false); } : undefined}
               onStatus={(s, error) => setMapStatus({ s, error })} />
             {picking && (
               <div className="pick-banner" role="status">
                 <MapPin size={16} aria-hidden="true" />Tap the map where you are
-                <button className="btn quiet small" onClick={() => { setPicking(false); setListOpen(true); }}>Cancel</button>
+                <button className="btn quiet small" onClick={() => setPicking(false)}>Cancel</button>
               </div>
             )}
             {mapStatus.s !== "ready" && <MapNote status={mapStatus.s} error={mapStatus.error} admin={profile.role === "admin"} />}
@@ -203,57 +250,8 @@ export function PickerPage() {
         )}
       </section>
 
-      <aside className={`sheet${listOpen ? "" : " closed"}`} aria-label="Today's list">
-        <header className="sheet-head">
-          <button className="sheet-grab" onClick={() => setListOpen(!listOpen)} aria-expanded={listOpen} aria-label={listOpen ? "Hide the list" : "Show the list"}>
-            <span className="sheet-title">
-              <b>Lunch for {team.name}</b>
-              {today && <span className="muted small">{list.length} place{list.length === 1 ? "" : "s"}{pool.length ? ` · ${pool.length} contender${pool.length === 1 ? "" : "s"}` : ""}</span>}
-            </span>
-            {narrow ? (listOpen ? <ChevronDown size={20} aria-hidden="true" /> : <ChevronUp size={20} aria-hidden="true" />) : <ChevronLeft size={20} aria-hidden="true" />}
-          </button>
-        </header>
-
-        <div className="sheet-body">
-          <WhereBar geo={geo} ready={ready} onPickOnMap={() => { setPicking(true); if (narrow) setListOpen(false); }} />
-
-          <section className={`lp-filters${filtersOpen ? " open" : ""}`}>
-            <button className="lp-filters-head" onClick={() => setFiltersOpen(!filtersOpen)} aria-expanded={filtersOpen}>
-              <span className="lp-filters-title">Team filters</span>
-              {!filtersOpen && <span className="lp-filters-sum">{summary(filters)}</span>}
-              <ChevronDown size={18} aria-hidden="true" className="lp-chev" />
-            </button>
-            {filtersOpen && <>
-              <FilterForm f={filters} onChange={setFilters} />
-              <FiltersBy team={team} members={members} me={profile.id} />
-            </>}
-          </section>
-
-          <button className="btn lp-run" onClick={() => void run()} disabled={!ready || running || !geo.pos}>
-            {running ? "Searching" : "Filter"}
-          </button>
-          {ready && !geo.pos && geo.status !== "locating" && <p className="hint lp-center">Set where you are (above) before you filter.</p>}
-          {runError && <div className="alert err">{runError}</div>}
-
-          <Results today={today} stale={stale} running={running} me={profile.id} list={list} visible={visible} view={view} setView={setView}
-            poolIds={poolIds} selected={selected} onSelect={setSelected} onToggle={toggle} onBan={ban} poolError={poolError} teamName={team.name} />
-        </div>
-      </aside>
-
-      {undo && (
-        <div className="toast" role="status">
-          <span><b>{undo.name}</b> won't be suggested again.</span>
-          <button className="linkbtn" onClick={unban}>Undo</button>
-          <button className="toast-x" onClick={() => setUndo(null)} aria-label="Dismiss"><X size={15} aria-hidden="true" /></button>
-        </div>
-      )}
-
-      {!listOpen && !narrow && (
-        <button className="sheet-tab" onClick={() => setListOpen(true)}><List size={17} aria-hidden="true" />Show list<ChevronRight size={16} aria-hidden="true" /></button>
-      )}
-
-      {today && (
-        <div className={`fab-wrap${narrow && !listOpen ? " raised" : ""}`}>
+      {all.length > 0 && (
+        <div className="fab-wrap">
           {hint && <div className="fab-hint" role="status">Tick at least 2 places as contenders first.</div>}
           <button className={`fab${pool.length < 2 ? " dim" : ""}`} onClick={choose} aria-describedby="fab-count">
             <Dices size={22} aria-hidden="true" />
@@ -261,6 +259,19 @@ export function PickerPage() {
             <span className="fab-count" id="fab-count" aria-label={`${pool.length} contenders`}>{pool.length}</span>
           </button>
         </div>
+      )}
+
+      {toast && (
+        <div className="toast" role="status">
+          <span>{toast.text}</span>
+          {toast.undo && <button className="linkbtn" onClick={() => { const u = toast.undo!; setToast(null); u(); }}>Undo</button>}
+          <button className="toast-x" onClick={() => setToast(null)} aria-label="Dismiss"><X size={15} aria-hidden="true" /></button>
+        </div>
+      )}
+
+      {random && randomOrigin && (
+        <RandomPick origin={randomOrigin} filters={filters} banned={banned} skipped={skipped} onList={new Set(all.map((s) => s.id))}
+          extra={period?.added ?? []} onClose={() => setRandom(false)} />
       )}
     </main>
   );
@@ -337,31 +348,32 @@ function FilterForm({ f, onChange }: { f: LunchFilters; onChange: (f: LunchFilte
   );
 }
 
+
 function Results(props: {
-  today: TeamRun | null; stale: boolean; running: boolean; me: string; list: Suggestion[]; visible: Suggestion[];
+  today: TeamRun | null; stale: boolean; running: boolean; me: string; all: ListPlace[]; added: ListPlace[]; visible: ListPlace[];
   view: View; setView: (v: View) => void; poolIds: Set<string>; selected: string | null;
-  onSelect: (id: string | null) => void; onToggle: (id: string, on: boolean) => void; onBan: (s: Suggestion) => void;
-  poolError: string; teamName: string;
+  onSelect: (id: string | null) => void; onToggle: (id: string, on: boolean) => void;
+  onNotToday: (s: ListPlace) => void; onBan: (s: ListPlace) => void; onRemove: (s: ListPlace) => void; onClearAdded: () => void;
+  teamName: string;
 }) {
-  const { today, stale, running, me, list, visible, view, setView, poolIds, selected, onSelect, onToggle, onBan, poolError, teamName } = props;
-  if (!today) {
-    if (running) return <div className="lp-idle"><span className="loading-dots"><i /><i /><i /></span> Searching Google Maps</div>;
-    return <p className="lp-idle">No list yet today. Check the team filters, then press Filter. Everyone in your team will see the same list.</p>;
-  }
-  const by = today.run_by === me ? "you" : today.run_by_name || "a teammate";
-  const prices = [...new Set(list.map(priceText).filter(Boolean))].sort((a, b) => parseFloat(a.replace(/[^\d.]/g, "") || "0") - parseFloat(b.replace(/[^\d.]/g, "") || "0"));
+  const { today, stale, running, me, all, added, visible, view, setView, poolIds, selected, onSelect, onToggle, onNotToday, onBan, onRemove, onClearAdded, teamName } = props;
+  const prices = [...new Set(all.map(priceText).filter(Boolean))].sort((a, b) => parseFloat(a.replace(/[^\d.]/g, "") || "0") - parseFloat(b.replace(/[^\d.]/g, "") || "0"));
   const filtered = view.pool || view.near || view.top || view.open || view.prices.length > 0;
   const chip = (on: boolean, label: string, flip: () => void) => <button key={label} aria-pressed={on} onClick={flip}>{label}</button>;
+  const addedIds = new Set(added.map((a) => a.id));
+  const shownAdded = visible.filter((s) => addedIds.has(s.id));
+  const shownRun = visible.filter((s) => !addedIds.has(s.id));
+  const card = (s: ListPlace) => (
+    <PlaceCard key={s.id} s={s} on={s.id === selected} inPool={poolIds.has(s.id)} onSelect={onSelect} onToggle={onToggle}
+      onNotToday={onNotToday} onBan={onBan} onRemove={onRemove} teamName={teamName} me={me} />
+  );
+  const by = today ? (today.run_by === me ? "you" : today.run_by_name || "a teammate") : "";
+
   return (
-    <div className={`lp-results${stale || running ? " stale" : ""}`}>
-      <div className="lp-runhead">
-        <b>Today's list</b>
-        <span className="muted small">Found by {by} at {clock(today.run_at)}{today.origin.label ? `, around ${today.origin.label}` : today.run_by === me ? "" : ", from their location"}. Tick places to make them contenders. Filter again keeps the contenders and finds new places for the rest.</span>
-      </div>
-      {stale && <div className="lp-stalenote">The team filters changed since this list was made. Press Filter to apply them.</div>}
-      {list.length > 0 && (
+    <div className={`lp-results${running ? " stale" : ""}`}>
+      {all.length > 0 && (
         <div className="qv" role="group" aria-label="Show only">
-          {chip(view.pool, `Contenders (${list.filter((s) => poolIds.has(s.id)).length})`, () => setView({ ...view, pool: !view.pool }))}
+          {chip(view.pool, `Contenders (${all.filter((s) => poolIds.has(s.id)).length})`, () => setView({ ...view, pool: !view.pool }))}
           {chip(view.near, "Within 5 min", () => setView({ ...view, near: !view.near }))}
           {chip(view.top, "4.5★ and up", () => setView({ ...view, top: !view.top }))}
           {chip(view.open, "Open", () => setView({ ...view, open: !view.open }))}
@@ -369,27 +381,52 @@ function Results(props: {
         </div>
       )}
       {filtered && (
-        <p className="qv-note small muted">Showing {visible.length} of {list.length}. These only change what you see. <button className="linkbtn" onClick={() => setView(NO_VIEW)}>Show all</button></p>
+        <p className="qv-note small muted">Showing {visible.length} of {all.length}. These only change what you see. <button className="linkbtn" onClick={() => setView(NO_VIEW)}>Show all</button></p>
       )}
-      {poolError && <div className="alert err">{poolError}</div>}
-      {list.length === 0 ? (
-        <p className="lp-idle">No place passed every filter. Try a larger radius, a wider budget or a lower minimum rating.</p>
-      ) : (
-        <ol className="pc-list">
-          {visible.map((s) => <PlaceCard key={s.id} s={s} on={s.id === selected} inPool={poolIds.has(s.id)} onSelect={onSelect} onToggle={onToggle} onBan={onBan} teamName={teamName} />)}
-        </ol>
+
+      {added.length > 0 && (
+        <section className="lp-sec" aria-label="Added for today">
+          <div className="lp-sechead">
+            <span><b>Added for today</b><span className="muted small">Stays on the list through every Filter until 9 AM.</span></span>
+            <button className="linkbtn small" onClick={onClearAdded}>Clear all</button>
+          </div>
+          {shownAdded.length > 0 && <ol className="pc-list">{shownAdded.map(card)}</ol>}
+        </section>
       )}
+
+      <section className="lp-sec" aria-label="Today's list">
+        {today ? (
+          <>
+            <div className="lp-sechead lp-runhead">
+              <span><b>Today's list</b>
+                <span className="muted small">Found by {by} at {clock(today.run_at)}{today.origin.label ? `, around ${today.origin.label}` : today.run_by === me ? "" : ", from their location"}. Tick places to make them contenders. Filter again keeps the contenders and finds new places for the rest.</span>
+              </span>
+            </div>
+            {stale && <div className="lp-stalenote">The team filters changed since this list was made. Press Filter to apply them.</div>}
+            {today.suggestions.length === 0 ? (
+              <p className="lp-idle">No place passed every filter. Try a larger radius, a wider budget or a lower minimum rating.</p>
+            ) : (
+              <ol className={`pc-list${stale ? " stale" : ""}`}>{shownRun.map(card)}</ol>
+            )}
+          </>
+        ) : running ? (
+          <div className="lp-idle"><span className="loading-dots"><i /><i /><i /></span> Searching Google Maps</div>
+        ) : (
+          <p className="lp-idle">No list yet today. Check the team filters, then press Filter. Everyone in your team will see the same list.</p>
+        )}
+      </section>
     </div>
   );
 }
 
-function PlaceCard({ s, on, inPool, onSelect, onToggle, onBan, teamName }: {
-  s: Suggestion; on: boolean; inPool: boolean; onSelect: (id: string | null) => void; onToggle: (id: string, on: boolean) => void;
-  onBan: (s: Suggestion) => void; teamName: string;
+function PlaceCard({ s, on, inPool, onSelect, onToggle, onNotToday, onBan, onRemove, teamName, me }: {
+  s: ListPlace; on: boolean; inPool: boolean; onSelect: (id: string | null) => void; onToggle: (id: string, on: boolean) => void;
+  onNotToday: (s: ListPlace) => void; onBan: (s: ListPlace) => void; onRemove: (s: ListPlace) => void; teamName: string; me: string;
 }) {
   const [asking, setAsking] = useState(false);
+  const isAdded = s.addedByName !== undefined;
   return (
-    <li id={`lp-${s.id}`} className={`pc${on ? " on" : ""}${inPool ? " pooled" : ""}`}>
+    <li id={`lp-${s.id}`} className={`pc${on ? " on" : ""}${inPool ? " pooled" : ""}${isAdded ? " added" : ""}`}>
       <div className="pc-top">
         <button className="pc-main" onClick={() => onSelect(on ? null : s.id)} aria-pressed={on}>
           <span className="pc-rank">{s.rank}</span>
@@ -416,8 +453,17 @@ function PlaceCard({ s, on, inPool, onSelect, onToggle, onBan, teamName }: {
         </div>
       ) : (
         <div className="pc-foot">
-          {s.tag ? <span className={`tag ${s.tag.kind}`}>{s.tag.text}</span> : <span />}
-          <button className="ban-btn" onClick={() => setAsking(true)}><Ban size={13} aria-hidden="true" />Never again</button>
+          {isAdded
+            ? <span className="tag added">Added by {s.addedBy === me ? "you" : s.addedByName || "a teammate"}</span>
+            : s.tag ? <span className={`tag ${s.tag.kind}`}>{s.tag.text}</span> : <span />}
+          <span className="pc-acts">
+            {isAdded
+              ? <button className="act-btn" onClick={() => onRemove(s)}><Trash2 size={13} aria-hidden="true" />Remove</button>
+              : <>
+                <button className="act-btn" onClick={() => onNotToday(s)} title="Hide until 9 AM"><CalendarX2 size={13} aria-hidden="true" />Not today</button>
+                <button className="act-btn ban" onClick={() => setAsking(true)}><Ban size={13} aria-hidden="true" />Never again</button>
+              </>}
+          </span>
         </div>
       )}
       {on && (
@@ -428,5 +474,23 @@ function PlaceCard({ s, on, inPool, onSelect, onToggle, onBan, teamName }: {
         </div>
       )}
     </li>
+  );
+}
+
+/** Places marked Not today, with a way to bring each back before 9 AM. */
+function NotTodayList({ list, me, onBack }: { list: SkippedPlace[]; me: string; onBack: (x: SkippedPlace) => void }) {
+  if (!list.length) return null;
+  return (
+    <details className="nt">
+      <summary><CalendarX2 size={15} aria-hidden="true" />Not today ({list.length})<span className="muted small">Hidden until 9 AM</span></summary>
+      <ul>
+        {list.map((x) => (
+          <li key={x.id}>
+            <span><b>{x.name || "Unnamed place"}</b><span className="muted small">by {x.by === me ? "you" : x.byName || "a teammate"}</span></span>
+            <button className="btn quiet small" onClick={() => onBack(x)}>Bring back</button>
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }

@@ -3,6 +3,7 @@
 import { Link } from "react-router-dom";
 import { Play } from "lucide-react";
 import { useApp } from "../lib/store.ts";
+import { useTeamList } from "../lib/list.ts";
 import { BackLink } from "../components/Bits.tsx";
 import { WheelArt } from "../components/Wheel.tsx";
 import type { ReactNode } from "react";
@@ -13,11 +14,12 @@ const GAMES: Game[] = [
   { to: "/choose/wheel", title: "Spin the Wheel", text: "Every contender gets a slice. Spin it, and lunch is wherever the wheel stops.", art: <WheelArt /> },
 ];
 
+/** Today's contenders, from the places on the team's list. */
 export function useContenders() {
-  const today = useApp((s) => s.today);
+  const { all } = useTeamList();
   const ids = useApp((s) => s.teamDay?.contenders);
   const set = new Set(ids ?? []);
-  return (today?.suggestions ?? []).filter((s) => set.has(s.id));
+  return all.filter((s) => set.has(s.id));
 }
 
 export function ChoosePage() {

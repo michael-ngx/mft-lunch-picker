@@ -31,7 +31,7 @@ interface Props {
   /** When set, tapping the map calls this with the tapped spot. */
   onTap?: (pos: LatLng) => void;
   onStatus?: (s: MapStatus, error?: string) => void;
-  /** Space covered by the floating list, kept clear when the map fits the circle. */
+  /** Space kept clear around the circle when the map fits it. */
   padding?: { top: number; right: number; bottom: number; left: number };
 }
 
@@ -118,7 +118,7 @@ export function LunchMap({ apiKey, mapId, me, center, radiusM, suggestions, sele
     g.pins.forEach((p) => (p.map = null));
     g.pins.clear();
     for (const s of suggestions) {
-      const pin = new g.Marker({ map: g.map, position: s.pos, content: el("lp-pin", String(s.rank)), title: `${s.rank}. ${s.name}`, zIndex: 100 - s.rank, gmpClickable: true });
+      const pin = new g.Marker({ map: g.map, position: s.pos, content: el("addedByName" in s ? "lp-pin added" : "lp-pin", String(s.rank)), title: `${s.rank}. ${s.name}`, zIndex: 100 - s.rank, gmpClickable: true });
       pin.addEventListener("gmp-click", () => latest.current.onSelect(s.id));
       g.pins.set(s.id, pin);
     }

@@ -150,6 +150,21 @@ export async function searchLunch(origin: LatLng, f: LunchFilters, rand: () => n
   return { candidates, places, cuisine };
 }
 
+// The places found by the last search, so Random pick can draw from them without
+// searching again. Kept for 20 minutes for the same spot and filters.
+let pool: { key: string; at: number; result: SearchResult } | null = null;
+const poolKey = (o: LatLng, f: LunchFilters) => [o.lat.toFixed(4), o.lng.toFixed(4), f.radiusM, f.minRating, f.openNow].join("|");
+export function rememberPool(origin: LatLng, f: LunchFilters, result: SearchResult) {
+  pool = { key: poolKey(origin, f), at: Date.now(), result };
+}
+/** The places around a spot: the last search's when it is recent and for the same spot and filters, else a new search. */
+export async function areaPool(origin: LatLng, f: LunchFilters): Promise<SearchResult> {
+  if (pool && pool.key === poolKey(origin, f) && Date.now() - pool.at < 20 * 60_000) return pool.result;
+  const result = await searchLunch(origin, f);
+  rememberPool(origin, f, result);
+  return result;
+}
+
 /** Adds photos to the places that made the list (only those, to keep Google costs
  *  down). Places that already have photos, such as kept contenders, keep them. */
 export async function withPhotos<T extends Candidate>(list: T[], places: SearchResult["places"]): Promise<T[]> {
@@ -180,6 +195,33 @@ export async function suggestAddresses(input: string, near: LatLng | null): Prom
     .map((x) => x.placePrediction)
     .filter((p): p is google.maps.places.PlacePrediction => !!p)
     .map((p) => ({ id: p.placeId, main: p.mainText?.text ?? p.text.text, secondary: p.secondaryText?.text ?? "", prediction: p }));
+}
+
+// A separate session for searching places to add to the list.
+let placeSession: google.maps.places.AutocompleteSessionToken | null = null;
+
+/** Google's suggestions for a place name, closest to `near` first, with their distance from it. */
+export async function suggestPlaces(input: string, near: LatLng | null): Promise<(AddressHit & { distanceM: number | null })[]> {
+  const { AutocompleteSuggestion, AutocompleteSessionToken } = (await google.maps.importLibrary("places")) as google.maps.PlacesLibrary;
+  if (!placeSession) placeSession = new AutocompleteSessionToken();
+  const { suggestions } = await AutocompleteSuggestion.fetchAutocompleteSuggestions({
+    input, sessionToken: placeSession, locationBias: { center: near ?? MONTREAL, radius: 5_000 }, ...(near ? { origin: near } : {}),
+  });
+  return suggestions
+    .map((x) => x.placePrediction)
+    .filter((p): p is google.maps.places.PlacePrediction => !!p)
+    .map((p) => ({ id: p.placeId, main: p.mainText?.text ?? p.text.text, secondary: p.secondaryText?.text ?? "", prediction: p, distanceM: p.distanceMeters ?? null }));
+}
+
+/** The details and photos of a chosen place, ready to add to the list. */
+export async function resolvePlace(hit: AddressHit): Promise<Candidate> {
+  const place = hit.prediction.toPlace();
+  await place.fetchFields({ fields: FIELDS });
+  placeSession = null;
+  const c = toCandidate(place, Date.now());
+  if (!c) throw new Error("Google has no position for that place. Try another one.");
+  const photos = await photosOf(place).catch(() => [] as PlacePhoto[]);
+  return { ...c, photos };
 }
 
 /** The position and a short label for a chosen suggestion. */
